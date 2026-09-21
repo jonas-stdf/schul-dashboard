@@ -482,25 +482,33 @@ function generate_plan() {
             failures.push({email: b, reason: `Zwangspaar mit ${display_name(a)} nicht erfüllbar`});
         }
     }
-    // Zusätzlich zur reinen Wunsch-Slot-Quote: Wie viele SuS mit mindestens
-    // einem bestätigten Wunschpartner haben am Ende auch mindestens einen
-    // davon tatsächlich als Tischnachbarn bekommen ("zufrieden")?
+    // Die bis zu 3 Wunschpartner sind gleichberechtigt ("oder", nicht "und") -
+    // eine Person gilt als zufrieden, sobald EINER ihrer bestätigten Wünsche
+    // tatsächlich Tischnachbar wird. Die anderen, nicht getroffenen Wünsche
+    // dürfen NICHT einzeln als "nicht erfüllt" markiert werden, sonst wäre
+    // (bei mehreren bestätigten Wünschen pro Person) fast immer irgendeiner
+    // davon nicht erfüllt und praktisch jede Person würde markiert, obwohl
+    // ihr eigentliches Ziel - mindestens ein Treffer - längst erreicht ist.
     let students_with_want = new Set();
     let students_satisfied = new Set();
     for (let email in wishes) {
         if (!emails.includes(email)) continue;
         let w = wishes[email];
-        for (let slot of ['want1', 'want2', 'want3']) {
-            let target = w[slot], status = w[slot + '_status'];
-            if (status === 'confirmed' && target && emails.includes(target)) {
-                confirmed_total++;
-                students_with_want.add(email);
-                if (neighbors(placement[email], placement[target])) {
-                    confirmed_ok++;
-                    students_satisfied.add(email);
-                } else {
-                    failures.push({email: email, reason: `Wunsch mit ${display_name(target)} nicht erfüllt`});
-                }
+        let confirmed_targets = ['want1', 'want2', 'want3']
+            .filter(slot => w[slot + '_status'] === 'confirmed' && w[slot] && emails.includes(w[slot]))
+            .map(slot => w[slot]);
+
+        if (confirmed_targets.length > 0) {
+            confirmed_total++;
+            students_with_want.add(email);
+            let hit = confirmed_targets.find(target => neighbors(placement[email], placement[target]));
+            if (hit) {
+                confirmed_ok++;
+                students_satisfied.add(email);
+            } else if (confirmed_targets.length === 1) {
+                failures.push({email: email, reason: `Wunsch mit ${display_name(confirmed_targets[0])} nicht erfüllt`});
+            } else {
+                failures.push({email: email, reason: `Keiner der bestätigten Wunschpartner (${confirmed_targets.map(display_name).join(', ')}) wurde Tischnachbar`});
             }
         }
         if (w.avoid1_status === 'confirmed' && w.avoid1 && emails.includes(w.avoid1)) {
