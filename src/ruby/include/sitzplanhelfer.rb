@@ -11,6 +11,18 @@ class Main < Sinatra::Base
         assert(sph_can_manage?(klasse), 'Kein Zugriff auf den Sitzplanhelfer für diese Klasse.')
     end
 
+    # Bricht mit einer Meldung ab, die die Lehrkraft tatsächlich zu sehen
+    # bekommt. Ein blosses assert landet nur im Server-Log - im Browser käme
+    # dann nur "Bei der Bearbeitung der Anfrage ist ein Fehler aufgetreten" an
+    # (siehe api_call in code.js). Gleiches Muster wie in login.rb: respond()
+    # setzt die Antwort, assert bricht die Verarbeitung ab. Bewusst nur für
+    # erwartete, behebbare Situationen - nicht für Zugriffsschutz, wo eine
+    # generische Meldung richtig ist.
+    def sph_fail!(message)
+        respond(:error => message)
+        assert(false, message, true)
+    end
+
     # Hinweis: Ein eigener "hier ist dein Sitzplatzwunsch"-Banner ist nicht
     # nötig - #{print_current_polls()} (poll.rb) zeigt jeder eingeloggten
     # Person (auch SuS) bereits automatisch jede offene Umfrage an, bei der
@@ -83,10 +95,12 @@ class Main < Sinatra::Base
         # Umfrage an alle SuS auslösen. Verwaltung eines bereits laufenden
         # Zyklus (Wünsche bestätigen, Paare/Regeln, Plan erzeugen/speichern)
         # bleibt bewusst für alle Lehrkräfte der Klasse offen (sph_can_manage?).
-        assert(klassenleiter_for_klasse_or_admin_logged_in?(klasse),
-               "Nur die Klassenleitung (#{sph_klassenleiter_names(klasse).join(', ')}) kann eine Sitzplatzwunsch-Umfrage starten.")
+        unless klassenleiter_for_klasse_or_admin_logged_in?(klasse)
+            namen = sph_klassenleiter_names(klasse).join(', ')
+            sph_fail!("Nur die Klassenleitung (#{namen.empty? ? 'nicht hinterlegt' : namen}) kann eine Sitzplatzwunsch-Umfrage starten.")
+        end
         sus_emails = @@schueler_for_klasse[klasse] || []
-        assert(sus_emails.size > 0, 'Diese Klasse hat keine SuS.')
+        sph_fail!('Für diese Klasse sind keine SuS hinterlegt.') if sus_emails.empty?
 
         existing = neo4j_query(<<~END_OF_QUERY, :klasse => klasse, :raum => raum)
             MATCH (sc:SeatingCycle {klasse: $klasse, raum: $raum})
@@ -371,10 +385,11 @@ class Main < Sinatra::Base
         other_pairs = JSON.parse(sc[other_prop] || '[]')
         name_a = (@@user_info[data[:email_a]] || {})[:display_name_official] || data[:email_a]
         name_b = (@@user_info[data[:email_b]] || {})[:display_name_official] || data[:email_b]
-        assert(!other_pairs.any? { |p| p.sort == wanted_pair },
-               "#{name_a} und #{name_b} sind bereits als " \
-               "\"#{data[:kind] == 'forced' ? 'darf nicht zusammensitzen' : 'muss zusammensitzen'}\" gesetzt - " \
-               "bitte das zuerst entfernen.")
+        if other_pairs.any? { |p| p.sort == wanted_pair }
+            sph_fail!("#{name_a} und #{name_b} sind bereits als " \
+                      "\"#{data[:kind] == 'forced' ? 'darf nicht zusammensitzen' : 'muss zusammensitzen'}\" gesetzt - " \
+                      "bitte das zuerst entfernen.")
+        end
         # Ein Verbotspaar widerspricht sich auch, wenn beide bereits über
         # exakte feste Plätze (siehe sph_set_fixed_rule) zu Tischnachbarn
         # gemacht wurden - genau der umgekehrte Fall zur Prüfung dort.
@@ -383,8 +398,8 @@ class Main < Sinatra::Base
             rule_a = fixed.find { |r| r[0] == data[:email_a] && r[1][0] == r[1][1] && r[2][0] == r[2][1] }
             rule_b = fixed.find { |r| r[0] == data[:email_b] && r[1][0] == r[1][1] && r[2][0] == r[2][1] }
             if rule_a && rule_b && rule_a[2][0] == rule_b[2][0] && (rule_a[1][0] - rule_b[1][0]).abs == 1
-                assert(false, "#{name_a} und #{name_b} sitzen bereits über feste Plätze nebeneinander - " \
-                       "bitte zuerst einen der beiden festen Plätze entfernen.")
+                sph_fail!("#{name_a} und #{name_b} sitzen bereits über feste Plätze nebeneinander - " \
+                          "bitte zuerst einen der beiden festen Plätze entfernen.")
             end
         end
         pairs = JSON.parse(sc[prop] || '[]')
@@ -425,7 +440,7 @@ class Main < Sinatra::Base
             conflict = rules.find { |r| r[0] != data[:email] && r[1] == [data[:x_min], data[:x_max]] && r[2] == [data[:y_min], data[:y_max]] }
             if conflict
                 conflict_name = (@@user_info[conflict[0]] || {})[:display_name_official] || conflict[0]
-                assert(false, "Dieser Platz ist bereits #{conflict_name} fest zugewiesen - bitte das zuerst entfernen.")
+                sph_fail!("Dieser Platz ist bereits #{conflict_name} fest zugewiesen - bitte das zuerst entfernen.")
             end
             # Genauso widersprüchlich: der Nachbarplatz ist bereits fest an
             # jemanden vergeben, mit dem diese Person als Verbotspaar
@@ -436,7 +451,7 @@ class Main < Sinatra::Base
                 forbidden_pairs = JSON.parse(sc[:forbidden_pairs] || '[]')
                 if forbidden_pairs.any? { |p| p.sort == [data[:email], neighbor_rule[0]].sort }
                     neighbor_name = (@@user_info[neighbor_rule[0]] || {})[:display_name_official] || neighbor_rule[0]
-                    assert(false, "#{neighbor_name} sitzt bereits fest auf dem Nachbarplatz, ist aber als \"dürfen nicht zusammensitzen\" markiert - bitte das zuerst entfernen.")
+                    sph_fail!("#{neighbor_name} sitzt bereits fest auf dem Nachbarplatz, ist aber als \"dürfen nicht zusammensitzen\" markiert - bitte das zuerst entfernen.")
                 end
             end
         end
@@ -590,7 +605,9 @@ class Main < Sinatra::Base
             RETURN x
             LIMIT 1;
         END_OF_QUERY
-        assert(existing_open.empty?, 'Es ist bereits eine Wunschrunde/Bearbeitung offen. Bitte diese zuerst abschließen oder speichern.')
+        unless existing_open.empty?
+            sph_fail!('Es ist bereits eine Wunschrunde oder eine Bearbeitung offen. Bitte diese zuerst speichern oder oben verwerfen, bevor du einen anderen Plan bearbeitest.')
+        end
 
         new_id = RandomTag.generate(12)
         timestamp = Time.now.to_i
