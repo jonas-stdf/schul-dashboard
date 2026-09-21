@@ -213,7 +213,7 @@ AUFSICHT_ZEIT = {1 => '08:00', 2 => '09:00', 3 => '09:55', 4 => '10:40',
                  6 => '12:50', 7 => '13:40', 8 => '14:30'}
 
 KLASSEN_ORDER = ['5a', '11', '12']
-ROOM_ORDER = %w(101 102 103 104)
+ROOM_ORDER = %w(101 102 103 104 301)
 GROUP_AF_ICONS = {
     ''   => "<span style='font-size:120%;'>🏠</span>",
     'it' => "<span style='font-size:120%;'>🇮🇹</span>",
@@ -270,3 +270,9 @@ EXCLUDE_FROM_SELF_TEST_REPORT = []
 ZEUGNISKONFERENZEN = []
 
 FOTO_PASSWORD = nil
+
+# Deadlines für Hinweis-Kästen auf der Startseite (ISO-Format). Ein Kasten
+# wird nur angezeigt, wenn der Termin in der Zukunft, aber weniger als
+# 7 Tage entfernt liegt - ein Termin in der Vergangenheit blendet ihn aus.
+DEADLINE_NOTENEINTRAGUNG = '2024-01-01T00:00:00'
+DEADLINE_CONSIDER = '2024-01-01T00:00:00'
