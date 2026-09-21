@@ -148,6 +148,22 @@ class Main < Sinatra::Base
         end
     end
 
+    # Setzt das Enddatum/-zeit der zur Wunschrunde gehörenden Umfrage auf
+    # "jetzt", damit sie sofort aus #{print_current_polls()} verschwindet.
+    # Wird sowohl vom expliziten "Wunschrunde schließen"-Knopf als auch beim
+    # Speichern eines Plans aufgerufen - ein gespeicherter/abgeschlossener
+    # Zyklus darf NIE eine noch tagelang laufende Umfrage hinterlassen, sonst
+    # sehen SuS nach dem Start einer neuen Runde plötzlich zwei gleichzeitig.
+    def sph_close_poll_run!(poll_run_id)
+        now_date = Date.today.strftime('%Y-%m-%d')
+        now_time = (Time.now - 60).strftime('%H:%M')
+        neo4j_query(<<~END_OF_QUERY, :prid => poll_run_id, :now_date => now_date, :now_time => now_time)
+            MATCH (pr:PollRun {id: $prid})
+            SET pr.end_date = $now_date
+            SET pr.end_time = $now_time;
+        END_OF_QUERY
+    end
+
     post '/api/sph_close_wishes' do
         require_teacher!
         data = parse_request_data(:required_keys => [:cycle_id])
@@ -158,13 +174,7 @@ class Main < Sinatra::Base
         assert(rows.size > 0, 'Zyklus nicht gefunden.')
         sc = rows.first['sc']
         require_sph_access!(sc[:klasse])
-        now_date = Date.today.strftime('%Y-%m-%d')
-        now_time = (Time.now - 60).strftime('%H:%M')
-        neo4j_query(<<~END_OF_QUERY, :prid => sc[:poll_run_id], :now_date => now_date, :now_time => now_time)
-            MATCH (pr:PollRun {id: $prid})
-            SET pr.end_date = $now_date
-            SET pr.end_time = $now_time;
-        END_OF_QUERY
+        sph_close_poll_run!(sc[:poll_run_id])
         respond(:ok => true)
     end
 
@@ -382,6 +392,7 @@ class Main < Sinatra::Base
                                   :optional_keys => [:satisfied_emails],
                                   :max_body_length => 256 * 1024, :max_string_length => 256 * 1024)
         sc = sph_load_cycle_for_edit!(data[:cycle_id])
+        sph_close_poll_run!(sc[:poll_run_id])
         timestamp = Time.now.to_i
         params = {:id => data[:cycle_id], :seats => data[:seats], :unresolved => data[:unresolved],
                   :satisfied_emails => data[:satisfied_emails] || '[]', :timestamp => timestamp}
