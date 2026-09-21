@@ -23,8 +23,11 @@ table.sph-wishes td, table.sph-wishes th {
 .sph-status-btn.active {
     opacity: 1;
 }
-.sph-status-btn.confirm.active { color: #2e7d32; }
 .sph-status-btn.reject.active { color: #c62828; }
+.sph-wish-rejected {
+    color: #999;
+    text-decoration: line-through;
+}
 .sph-pair-list span.pair-chip, .sph-rule-list span.rule-chip {
     display: inline-block;
     background: #eee;
@@ -102,8 +105,8 @@ table.sph-wishes td, table.sph-wishes th {
 
     <div class="sph-section" id="sph_wishes_section" style="display: none;">
         <h4>Wünsche der Schüler:innen</h4>
-        <p class="sph-legend">Grüner Haken = Wunsch bestätigt (fließt in die Planung ein), rotes Kreuz = abgelehnt (wird ignoriert). Standardmäßig unentschieden.
-        🤝 = wechselseitiger Wunsch (beide wollen sich gegenseitig) – diese lassen sich am zuverlässigsten erfüllen, gute Kandidaten zum Bestätigen.
+        <p class="sph-legend">Alle Wünsche fließen automatisch in die Planung ein – eine extra Bestätigung ist nicht nötig. Nur das rote Kreuz lehnt einen einzelnen Wunsch ab (durchgestrichen, wird dann ignoriert; nochmal klicken macht es rückgängig).
+        🤝 = wechselseitiger Wunsch (beide wollen sich gegenseitig) – diese werden bei der Planung bevorzugt erfüllt.
         Die bis zu drei Wunschpartner sind gleichberechtigt (keine Rangfolge) – da an jedem Tisch nur 2 Personen sitzen, reicht es für „erfüllt", wenn <strong>einer</strong> davon tatsächlich der Tischnachbar wird.</p>
         <table class="table table-sm sph-wishes">
             <thead>
@@ -165,10 +168,18 @@ var forced_pairs = [];
 var forbidden_pairs = [];
 var fixed_rules = [];
 var last_seats = {};
+// Wer hatte letzte Runde einen aktiven (nicht abgelehnten) Wunsch, der NICHT
+// erfüllt wurde - nicht weil die Lehrkraft ihn abgelehnt hat, sondern weil
+// sich einfach keine Paarung ergeben hat? Diese Personen sollen dieses Mal
+// bevorzugt werden. Gegenstück: wer hatte einen Wunsch, der erfüllt WURDE,
+// wird dieses Mal etwas zurückgestuft (analog zur vorne/hinten-Rotation).
+var last_unlucky_emails = new Set();
+var last_lucky_emails = new Set();
 var open_cycle_id = null;
 var current_placement = {};
 var current_unresolved = [];
 var current_satisfaction = {ok: 0, total: 0};
+var current_satisfied_emails = [];
 
 #{File.read('/data/sitzplan/seats.js')}
 
@@ -275,13 +286,15 @@ function wishes_mutual_any(email_a, email_b) {
     return wb.want1 === email_a || wb.want2 === email_a;
 }
 
-// Wie oben, aber nur wenn auf BEIDEN Seiten bereits bestätigt - für die
-// Bewertungsfunktion beim Erzeugen des Plans (score()).
-function is_mutual_confirmed(email_a, target_b) {
+// Wünsche gelten automatisch (kein extra Bestätigen nötig) - nur "rejected"
+// nimmt einen Wunsch aus der Planung raus. "Wechselseitig" heißt also: beide
+// Seiten wünschen sich gegenseitig UND keine Seite hat das abgelehnt.
+function is_mutual_active(email_a, target_b) {
     let wb = wishes[target_b];
     if (!wb) return false;
-    return (wb.want1 === email_a && wb.want1_status === 'confirmed') ||
-           (wb.want2 === email_a && wb.want2_status === 'confirmed');
+    return (wb.want1 === email_a && wb.want1_status !== 'rejected') ||
+           (wb.want2 === email_a && wb.want2_status !== 'rejected') ||
+           (wb.want3 === email_a && wb.want3_status !== 'rejected');
 }
 
 function render_wishes() {
@@ -296,12 +309,11 @@ function render_wishes() {
         function cell(field, statusField) {
             if (!w[field]) return '<td>-</td><td></td>';
             let name = display_name(w[field]);
-            let status = w[statusField] || 'pending';
+            let rejected = w[statusField] === 'rejected';
             let mutual = wishes_mutual_any(s.email, w[field]) ? " <span title='Wechselseitiger Wunsch'>🤝</span>" : '';
             name = name + mutual;
-            return `<td>${name}</td><td style="white-space: nowrap;">` +
-                `<i class="fa fa-check sph-status-btn confirm ${status === 'confirmed' ? 'active' : ''}" data-email="${s.email}" data-slot="${statusField}" data-status="confirmed"></i>` +
-                `<i class="fa fa-times sph-status-btn reject ${status === 'rejected' ? 'active' : ''}" data-email="${s.email}" data-slot="${statusField}" data-status="rejected"></i>` +
+            return `<td class="${rejected ? 'sph-wish-rejected' : ''}">${name}</td><td style="white-space: nowrap;">` +
+                `<i class="fa fa-times sph-status-btn reject ${rejected ? 'active' : ''}" data-email="${s.email}" data-slot="${statusField}" data-status="rejected" title="Wunsch ablehnen"></i>` +
                 `</td>`;
         }
         rows += `<tr><td>${s.display_name}</td>${cell('want1', 'want1_status')}${cell('want2', 'want2_status')}${cell('want3', 'want3_status')}${cell('avoid1', 'avoid1_status')}</tr>`;
@@ -312,6 +324,7 @@ function render_wishes() {
         let current = (wishes[email] || {})[slot] || 'pending';
         let new_status = current === status ? 'pending' : status;
         api_call('/api/sph_set_wish_status', {cycle_id: open_cycle_id, email: email, slot: slot, status: new_status}, function (data) {
+            if (data.success === false) { alert(data.error || 'Konnte nicht gespeichert werden.'); return; }
             wishes[email] = wishes[email] || {};
             wishes[email][slot] = new_status;
             render_wishes();
@@ -361,6 +374,9 @@ function load_state() {
             }
         }
         last_seats = (data.last_cycle && data.last_cycle.seats) || {};
+        let last_unresolved = (data.last_cycle && data.last_cycle.unresolved) || [];
+        last_unlucky_emails = new Set(last_unresolved.filter(f => /^(Wunsch mit|Keiner der bestätigten)/.test(f.reason || '')).map(f => f.email));
+        last_lucky_emails = new Set((data.last_cycle && data.last_cycle.satisfied_emails) || []);
         render_pairs();
         render_rules();
         render_wishes();
@@ -428,27 +444,40 @@ function build_and_optimize_once(emails) {
     for (let [a, b] of forced_pairs) { locked.add(a); locked.add(b); }
     let swappable = emails.filter(e => !locked.has(e));
 
+    // Fairness über Runden hinweg: wer letztes Mal trotz aktivem Wunsch
+    // (nicht abgelehnt) keine Paarung bekommen hat, wird dieses Mal
+    // bevorzugt; wer letztes Mal schon seinen Wunsch bekommen hat, tritt
+    // etwas zurück - jeweils VOR jemandem mit "normaler" Ausgangslage.
+    function luck_multiplier(email) {
+        if (last_unlucky_emails.has(email)) return 3;
+        if (last_lucky_emails.has(email)) return 0.5;
+        return 1;
+    }
+
     function score(placement) {
         let total = 0;
         for (let email in wishes) {
             if (!emails.includes(email)) continue;
             let w = wishes[email];
-            // Wechselseitig bestätigte Wünsche sind fast immer erfüllbar (beide
+            let luck = luck_multiplier(email);
+            // Wechselseitig aktive Wünsche sind fast immer erfüllbar (beide
             // wollen sich, ein Tisch reicht) - deutlich stärker gewichten als
             // einseitige, damit die Suche diese "leichten Treffer" bevorzugt.
-            if (w.want1_status === 'confirmed' && w.want1 && emails.includes(w.want1)) {
-                let bonus = is_mutual_confirmed(email, w.want1) ? 25 : 5;
+            // Wünsche gelten automatisch, außer die Lehrkraft hat "abgelehnt"
+            // angeklickt (kein extra Bestätigen nötig).
+            if (w.want1_status !== 'rejected' && w.want1 && emails.includes(w.want1)) {
+                let bonus = (is_mutual_active(email, w.want1) ? 25 : 5) * luck;
                 total += neighbors(placement[email], placement[w.want1]) ? bonus : 0;
             }
-            if (w.want2_status === 'confirmed' && w.want2 && emails.includes(w.want2)) {
-                let bonus = is_mutual_confirmed(email, w.want2) ? 25 : 5;
+            if (w.want2_status !== 'rejected' && w.want2 && emails.includes(w.want2)) {
+                let bonus = (is_mutual_active(email, w.want2) ? 25 : 5) * luck;
                 total += neighbors(placement[email], placement[w.want2]) ? bonus : 0;
             }
-            if (w.want3_status === 'confirmed' && w.want3 && emails.includes(w.want3)) {
-                let bonus = is_mutual_confirmed(email, w.want3) ? 25 : 5;
+            if (w.want3_status !== 'rejected' && w.want3 && emails.includes(w.want3)) {
+                let bonus = (is_mutual_active(email, w.want3) ? 25 : 5) * luck;
                 total += neighbors(placement[email], placement[w.want3]) ? bonus : 0;
             }
-            if (w.avoid1_status === 'confirmed' && w.avoid1 && emails.includes(w.avoid1)) {
+            if (w.avoid1_status !== 'rejected' && w.avoid1 && emails.includes(w.avoid1)) {
                 total -= neighbors(placement[email], placement[w.avoid1]) ? 10 : 0;
             }
         }
@@ -507,7 +536,7 @@ function generate_plan() {
     let placement = best.placement;
 
     let failures = [];
-    let confirmed_total = 0, confirmed_ok = 0;
+    let wish_total = 0, wish_ok = 0;
     for (let rule of fixed_rules) {
         let [email, xr, yr] = rule;
         if (!emails.includes(email)) continue;
@@ -524,10 +553,10 @@ function generate_plan() {
         }
     }
     // Die bis zu 3 Wunschpartner sind gleichberechtigt ("oder", nicht "und") -
-    // eine Person gilt als zufrieden, sobald EINER ihrer bestätigten Wünsche
-    // tatsächlich Tischnachbar wird. Die anderen, nicht getroffenen Wünsche
-    // dürfen NICHT einzeln als "nicht erfüllt" markiert werden, sonst wäre
-    // (bei mehreren bestätigten Wünschen pro Person) fast immer irgendeiner
+    // eine Person gilt als zufrieden, sobald EINER ihrer (nicht abgelehnten)
+    // Wünsche tatsächlich Tischnachbar wird. Die anderen, nicht getroffenen
+    // Wünsche dürfen NICHT einzeln als "nicht erfüllt" markiert werden, sonst
+    // wäre (bei mehreren aktiven Wünschen pro Person) fast immer irgendeiner
     // davon nicht erfüllt und praktisch jede Person würde markiert, obwohl
     // ihr eigentliches Ziel - mindestens ein Treffer - längst erreicht ist.
     let students_with_want = new Set();
@@ -535,26 +564,26 @@ function generate_plan() {
     for (let email in wishes) {
         if (!emails.includes(email)) continue;
         let w = wishes[email];
-        let confirmed_targets = ['want1', 'want2', 'want3']
-            .filter(slot => w[slot + '_status'] === 'confirmed' && w[slot] && emails.includes(w[slot]))
+        let active_targets = ['want1', 'want2', 'want3']
+            .filter(slot => w[slot + '_status'] !== 'rejected' && w[slot] && emails.includes(w[slot]))
             .map(slot => w[slot]);
 
-        if (confirmed_targets.length > 0) {
-            confirmed_total++;
+        if (active_targets.length > 0) {
+            wish_total++;
             students_with_want.add(email);
-            let hit = confirmed_targets.find(target => neighbors(placement[email], placement[target]));
+            let hit = active_targets.find(target => neighbors(placement[email], placement[target]));
             if (hit) {
-                confirmed_ok++;
+                wish_ok++;
                 students_satisfied.add(email);
-            } else if (confirmed_targets.length === 1) {
-                failures.push({email: email, reason: `Wunsch mit ${display_name(confirmed_targets[0])} nicht erfüllt`});
+            } else if (active_targets.length === 1) {
+                failures.push({email: email, reason: `Wunsch mit ${display_name(active_targets[0])} nicht erfüllt`});
             } else {
-                failures.push({email: email, reason: `Keiner der bestätigten Wunschpartner (${confirmed_targets.map(display_name).join(', ')}) wurde Tischnachbar`});
+                failures.push({email: email, reason: `Keiner der bestätigten Wunschpartner (${active_targets.map(display_name).join(', ')}) wurde Tischnachbar`});
             }
         }
-        if (w.avoid1_status === 'confirmed' && w.avoid1 && emails.includes(w.avoid1)) {
-            confirmed_total++;
-            if (!neighbors(placement[email], placement[w.avoid1])) confirmed_ok++;
+        if (w.avoid1_status !== 'rejected' && w.avoid1 && emails.includes(w.avoid1)) {
+            wish_total++;
+            if (!neighbors(placement[email], placement[w.avoid1])) wish_ok++;
             else failures.push({email: email, reason: `sitzt trotzdem neben ${display_name(w.avoid1)}`});
         }
     }
@@ -567,8 +596,9 @@ function generate_plan() {
 
     current_placement = placement;
     current_unresolved = failures;
+    current_satisfied_emails = [...students_satisfied];
     current_satisfaction = {
-        ok: confirmed_ok, total: confirmed_total,
+        ok: wish_ok, total: wish_total,
         students_with_want: students_with_want.size, students_satisfied: students_satisfied.size,
     };
     render_placement();
@@ -686,7 +716,13 @@ document.addEventListener('DOMContentLoaded', function () {
         generate_plan();
     });
     $('#sph_bu_save').click(function () {
-        api_call('/api/sph_save_cycle', {cycle_id: open_cycle_id, seats: JSON.stringify(current_placement), unresolved: JSON.stringify(current_unresolved)}, function (data) {
+        api_call('/api/sph_save_cycle', {
+            cycle_id: open_cycle_id,
+            seats: JSON.stringify(current_placement),
+            unresolved: JSON.stringify(current_unresolved),
+            satisfied_emails: JSON.stringify(current_satisfied_emails),
+        }, function (data) {
+            if (data.success === false) { alert(data.error || 'Konnte nicht gespeichert werden.'); return; }
             alert('Sitzplan gespeichert.');
         });
     });

@@ -230,6 +230,8 @@ class Main < Sinatra::Base
                 :id => sc[:id],
                 :saved_at => sc[:saved_at],
                 :seats => JSON.parse(sc[:seats] || '{}'),
+                :unresolved => JSON.parse(sc[:unresolved] || '[]'),
+                :satisfied_emails => JSON.parse(sc[:satisfied_emails] || '[]'),
             }
         end
 
@@ -274,7 +276,9 @@ class Main < Sinatra::Base
         require_teacher!
         data = parse_request_data(:required_keys => [:cycle_id, :email, :slot, :status])
         assert(['want1_status', 'want2_status', 'want3_status', 'avoid1_status'].include?(data[:slot]), 'Unbekannter Wunsch-Slot.')
-        assert(['pending', 'confirmed', 'rejected'].include?(data[:status]), 'Unbekannter Status.')
+        # Wünsche gelten automatisch ("pending" zählt also wie ein normaler,
+        # aktiver Wunsch) - nur "rejected" nimmt einen Wunsch aus der Planung.
+        assert(['pending', 'rejected'].include?(data[:status]), 'Unbekannter Status.')
         rows = neo4j_query(<<~END_OF_QUERY, :id => data[:cycle_id])
             MATCH (sc:SeatingCycle {id: $id})
             RETURN sc;
@@ -375,13 +379,17 @@ class Main < Sinatra::Base
     post '/api/sph_save_cycle' do
         require_teacher!
         data = parse_request_data(:required_keys => [:cycle_id, :seats, :unresolved],
+                                  :optional_keys => [:satisfied_emails],
                                   :max_body_length => 256 * 1024, :max_string_length => 256 * 1024)
         sc = sph_load_cycle_for_edit!(data[:cycle_id])
         timestamp = Time.now.to_i
-        neo4j_query(<<~END_OF_QUERY, :id => data[:cycle_id], :seats => data[:seats], :unresolved => data[:unresolved], :timestamp => timestamp)
+        params = {:id => data[:cycle_id], :seats => data[:seats], :unresolved => data[:unresolved],
+                  :satisfied_emails => data[:satisfied_emails] || '[]', :timestamp => timestamp}
+        neo4j_query(<<~END_OF_QUERY, params)
             MATCH (sc:SeatingCycle {id: $id})
             SET sc.seats = $seats
             SET sc.unresolved = $unresolved
+            SET sc.satisfied_emails = $satisfied_emails
             SET sc.saved_at = $timestamp;
         END_OF_QUERY
         respond(:ok => true)
