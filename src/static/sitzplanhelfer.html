@@ -71,6 +71,19 @@ table.sph-wishes td, table.sph-wishes th {
     font-size: 0.9em;
     color: #666;
 }
+.sph-tafel {
+    display: block;
+    width: fit-content;
+    margin: 1.5em auto 0 auto;
+    background-color: #2f3e2f;
+    color: #fff;
+    font-weight: bold;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 0.4em 3em;
+    border-radius: 0.3em;
+    box-shadow: 0 0.2em 0.4em rgba(0,0,0,0.3);
+}
 </style>
 <div class="sph-container">
     <h1>Sitzplanhelfer <span id='sph_label'></span></h1>
@@ -127,9 +140,11 @@ table.sph-wishes td, table.sph-wishes th {
     <div class="sph-section">
         <button class="btn btn-lg btn-primary" id="sph_bu_generate">Sitzplan erzeugen</button>
         <button class="btn btn-lg btn-success" id="sph_bu_save" style="display: none;">Sitzplan speichern</button>
+        <a class="btn btn-lg btn-outline-secondary" id="sph_link_public_view" href="#" target="_blank">Sitzplan für SuS anzeigen (ohne Wünsche)</a>
         <span id="sph_unresolved_summary" class="text-warning" style="display: block; margin-top: 0.5em;"></span>
     </div>
 
+    <span class="sph-tafel">Tafel</span>
     <div id="sph_seats"></div>
 </div>
 
@@ -580,6 +595,7 @@ document.addEventListener('DOMContentLoaded', function () {
     }
     $('#sph_label').text(`${klasse} – Raum ${raum}`);
     $('#sph_link_shuffler').attr('href', `/sitzplan/${klasse}/${raum}`);
+    $('#sph_link_public_view').attr('href', `/sitzplananzeige/${klasse}/${raum}`);
 
     $('#sph_bu_start_cycle').click(function () {
         api_call('/api/sph_start_cycle', {klasse: klasse, raum: raum}, function (data) {

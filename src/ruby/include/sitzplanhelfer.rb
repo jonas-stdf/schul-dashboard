@@ -217,6 +217,38 @@ class Main < Sinatra::Base
                 :open_cycle => open_cycle, :wishes => wishes, :last_cycle => last_cycle)
     end
 
+    # Öffentliche (Lehrkraft + eigene Klasse), wunsch-freie Sicht auf den
+    # zuletzt GESPEICHERTEN Sitzplan - für die SuS-Ansicht (sitzplananzeige.html).
+    # Absichtlich getrennt von sph_get_state: liefert NUR Namen + Plätze,
+    # nichts zu Wünschen/Bestätigungen/Paaren/Regeln (Lehrergeheimnis).
+    post '/api/sph_get_public_plan' do
+        require_user!
+        data = parse_request_data(:required_keys => [:klasse, :raum])
+        klasse = data[:klasse]
+        raum = data[:raum]
+        assert(sph_can_manage?(klasse) || @session_user[:klasse] == klasse,
+               'Kein Zugriff auf den Sitzplan dieser Klasse.')
+
+        rows = neo4j_query(<<~END_OF_QUERY, :klasse => klasse, :raum => raum)
+            MATCH (sc:SeatingCycle {klasse: $klasse, raum: $raum})
+            WHERE sc.saved_at IS NOT NULL
+            RETURN sc
+            ORDER BY sc.saved_at DESC
+            LIMIT 1;
+        END_OF_QUERY
+        if rows.empty?
+            respond(:ok => true, :klasse => klasse, :raum => raum, :saved_at => nil, :places => [])
+        else
+            sc = rows.first['sc']
+            seats_by_email = JSON.parse(sc[:seats] || '{}')
+            places = seats_by_email.map do |email, idx|
+                next nil unless @@user_info[email]
+                {:display_name => @@user_info[email][:display_name_official], :seat_index => idx}
+            end.compact
+            respond(:ok => true, :klasse => klasse, :raum => raum, :saved_at => sc[:saved_at], :places => places)
+        end
+    end
+
     post '/api/sph_set_wish_status' do
         require_teacher!
         data = parse_request_data(:required_keys => [:cycle_id, :email, :slot, :status])
