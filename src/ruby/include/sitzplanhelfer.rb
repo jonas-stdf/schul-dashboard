@@ -49,12 +49,16 @@ class Main < Sinatra::Base
             response = JSON.parse(row['response'] || '{}')
             want_indices = response['0'] || []
             avoid_index = response['1']
+            # Alle genannten Wunschpartner sind gleichberechtigt (kein 1./2./3.
+            # Wunsch) - da an einem Tisch ohnehin nur 1 Nachbar möglich ist,
+            # zählt ohnehin immer nur "trifft mindestens einer".
             wants = want_indices.map { |i| name_to_email[want_answers[i]] }.compact.reject { |e| e == email }
             avoids = avoid_index.nil? ? [] : [name_to_email[avoid_answers[avoid_index]]].compact.reject { |e| e == email }
             status = status_by_email[email] || {}
             wishes[email] = {
                 :want1 => wants[0], :want1_status => status[:want1_status] || 'pending',
                 :want2 => wants[1], :want2_status => status[:want2_status] || 'pending',
+                :want3 => wants[2], :want3_status => status[:want3_status] || 'pending',
                 :avoid1 => avoids[0], :avoid1_status => status[:avoid1_status] || 'pending',
             }
         end
@@ -84,7 +88,7 @@ class Main < Sinatra::Base
         else
             answers = sus_emails.map { |e| @@user_info[e][:display_name_official] }.sort
             items = [
-                {'type' => 'checkbox', 'title' => 'Neben wem möchtest du gerne sitzen? (max. 2 Personen)', 'answers' => answers, 'max_checks' => 2},
+                {'type' => 'checkbox', 'title' => 'Neben wem würdest du gerne sitzen? (bis zu 3 Personen, alle gleich wichtig)', 'answers' => answers, 'max_checks' => 3},
                 {'type' => 'radio', 'title' => 'Neben wem möchtest du auf keinen Fall sitzen? (optional)', 'answers' => answers},
             ]
             poll_id = RandomTag.generate(12)
@@ -216,7 +220,7 @@ class Main < Sinatra::Base
     post '/api/sph_set_wish_status' do
         require_teacher!
         data = parse_request_data(:required_keys => [:cycle_id, :email, :slot, :status])
-        assert(['want1_status', 'want2_status', 'avoid1_status'].include?(data[:slot]), 'Unbekannter Wunsch-Slot.')
+        assert(['want1_status', 'want2_status', 'want3_status', 'avoid1_status'].include?(data[:slot]), 'Unbekannter Wunsch-Slot.')
         assert(['pending', 'confirmed', 'rejected'].include?(data[:status]), 'Unbekannter Status.')
         rows = neo4j_query(<<~END_OF_QUERY, :id => data[:cycle_id])
             MATCH (sc:SeatingCycle {id: $id})

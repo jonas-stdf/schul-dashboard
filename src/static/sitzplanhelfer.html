@@ -84,10 +84,12 @@ table.sph-wishes td, table.sph-wishes th {
 
     <div class="sph-section" id="sph_wishes_section" style="display: none;">
         <h4>Wünsche der Schüler:innen</h4>
-        <p class="sph-legend">Grüner Haken = Wunsch bestätigt (fließt in die Planung ein), rotes Kreuz = abgelehnt (wird ignoriert). Standardmäßig unentschieden.</p>
+        <p class="sph-legend">Grüner Haken = Wunsch bestätigt (fließt in die Planung ein), rotes Kreuz = abgelehnt (wird ignoriert). Standardmäßig unentschieden.
+        🤝 = wechselseitiger Wunsch (beide wollen sich gegenseitig) – diese lassen sich am zuverlässigsten erfüllen, gute Kandidaten zum Bestätigen.
+        Die bis zu drei Wunschpartner sind gleichberechtigt (keine Rangfolge) – da an jedem Tisch nur 2 Personen sitzen, reicht es für „erfüllt", wenn <strong>einer</strong> davon tatsächlich der Tischnachbar wird.</p>
         <table class="table table-sm sph-wishes">
             <thead>
-                <tr><th>Name</th><th>Wunschpartner 1</th><th></th><th>Wunschpartner 2</th><th></th><th>Nicht neben</th><th></th></tr>
+                <tr><th>Name</th><th>Wunschpartner</th><th></th><th>Wunschpartner</th><th></th><th>Wunschpartner</th><th></th><th>Nicht neben</th><th></th></tr>
             </thead>
             <tbody id="sph_wishes_body"></tbody>
         </table>
@@ -146,6 +148,7 @@ var last_seats = {};
 var open_cycle_id = null;
 var current_placement = {};
 var current_unresolved = [];
+var current_satisfaction = {ok: 0, total: 0};
 
 #{File.read('/data/sitzplan/seats.js')}
 
@@ -243,6 +246,24 @@ function render_rules() {
     });
 }
 
+// Wünscht email_b (in irgendeinem Slot, unabhängig vom Bestätigen-Status)
+// auch email_a? Für die 🤝-Anzeige in der Tabelle, damit die Lehrkraft
+// wechselseitige Wünsche schon vor dem Bestätigen erkennt.
+function wishes_mutual_any(email_a, email_b) {
+    let wb = wishes[email_b];
+    if (!wb) return false;
+    return wb.want1 === email_a || wb.want2 === email_a;
+}
+
+// Wie oben, aber nur wenn auf BEIDEN Seiten bereits bestätigt - für die
+// Bewertungsfunktion beim Erzeugen des Plans (score()).
+function is_mutual_confirmed(email_a, target_b) {
+    let wb = wishes[target_b];
+    if (!wb) return false;
+    return (wb.want1 === email_a && wb.want1_status === 'confirmed') ||
+           (wb.want2 === email_a && wb.want2_status === 'confirmed');
+}
+
 function render_wishes() {
     if (!open_cycle_id) {
         $('#sph_wishes_section').hide();
@@ -256,12 +277,14 @@ function render_wishes() {
             if (!w[field]) return '<td>-</td><td></td>';
             let name = display_name(w[field]);
             let status = w[statusField] || 'pending';
+            let mutual = wishes_mutual_any(s.email, w[field]) ? " <span title='Wechselseitiger Wunsch'>🤝</span>" : '';
+            name = name + mutual;
             return `<td>${name}</td><td style="white-space: nowrap;">` +
                 `<i class="fa fa-check sph-status-btn confirm ${status === 'confirmed' ? 'active' : ''}" data-email="${s.email}" data-slot="${statusField}" data-status="confirmed"></i>` +
                 `<i class="fa fa-times sph-status-btn reject ${status === 'rejected' ? 'active' : ''}" data-email="${s.email}" data-slot="${statusField}" data-status="rejected"></i>` +
                 `</td>`;
         }
-        rows += `<tr><td>${s.display_name}</td>${cell('want1', 'want1_status')}${cell('want2', 'want2_status')}${cell('avoid1', 'avoid1_status')}</tr>`;
+        rows += `<tr><td>${s.display_name}</td>${cell('want1', 'want1_status')}${cell('want2', 'want2_status')}${cell('want3', 'want3_status')}${cell('avoid1', 'avoid1_status')}</tr>`;
     }
     $('#sph_wishes_body').html(rows);
     $('.sph-status-btn').off('click').on('click', function (e) {
@@ -303,16 +326,14 @@ function load_state() {
     });
 }
 
-function generate_plan() {
-    let emails = sus.map(s => s.email);
-    if (emails.length > seats.length) {
-        alert(`Diese Klasse hat ${emails.length} SuS, aber Raum ${raum} nur ${seats.length} Plätze.`);
-        return;
-    }
+// Baut EINEN Sitzplan-Versuch auf (harte Vorgaben zuerst, dann Rest zufällig)
+// und optimiert ihn per Zufalls-Tausch-Suche. Gibt {placement, score} zurück.
+// Wird von generate_plan() mehrfach mit unterschiedlichem Zufall aufgerufen,
+// damit nicht der erste (evtl. schlechte) Versuch das Ergebnis bestimmt.
+function build_and_optimize_once(emails) {
     let placement = {};
     let placed = new Set();
     let available = seats.map((s, i) => i);
-    let failures = [];
 
     function try_place_in_range(email, xr, yr) {
         let candidates = available.filter(i => seats[i][0] >= xr[0] && seats[i][0] <= xr[1] && seats[i][1] >= yr[0] && seats[i][1] <= yr[1]);
@@ -327,19 +348,13 @@ function generate_plan() {
     for (let rule of fixed_rules) {
         let [email, xr, yr] = rule;
         if (!emails.includes(email)) continue;
-        if (!try_place_in_range(email, xr, yr)) {
-            failures.push({email: email, reason: 'feste Platzvorgabe nicht erfüllbar'});
-        }
+        try_place_in_range(email, xr, yr);
     }
 
     for (let [a, b] of forced_pairs) {
         if (!emails.includes(a) || !emails.includes(b)) continue;
         if (placed.has(a) && placed.has(b)) continue;
-        if (placed.has(a) || placed.has(b)) {
-            failures.push({email: a, reason: `Zwangspaar mit ${display_name(b)} nicht erfüllbar (fester Platz im Weg)`});
-            failures.push({email: b, reason: `Zwangspaar mit ${display_name(a)} nicht erfüllbar (fester Platz im Weg)`});
-            continue;
-        }
+        if (placed.has(a) || placed.has(b)) continue;
         let found = false;
         for (let i of shuffle_array(available)) {
             let s = seats[i];
@@ -355,10 +370,6 @@ function generate_plan() {
                 }
             }
             if (found) break;
-        }
-        if (!found) {
-            failures.push({email: a, reason: `Zwangspaar mit ${display_name(b)} nicht erfüllbar (kein freier Nachbarplatz)`});
-            failures.push({email: b, reason: `Zwangspaar mit ${display_name(a)} nicht erfüllbar (kein freier Nachbarplatz)`});
         }
     }
 
@@ -376,16 +387,25 @@ function generate_plan() {
     for (let [a, b] of forced_pairs) { locked.add(a); locked.add(b); }
     let swappable = emails.filter(e => !locked.has(e));
 
-    function score() {
+    function score(placement) {
         let total = 0;
         for (let email in wishes) {
             if (!emails.includes(email)) continue;
             let w = wishes[email];
+            // Wechselseitig bestätigte Wünsche sind fast immer erfüllbar (beide
+            // wollen sich, ein Tisch reicht) - deutlich stärker gewichten als
+            // einseitige, damit die Suche diese "leichten Treffer" bevorzugt.
             if (w.want1_status === 'confirmed' && w.want1 && emails.includes(w.want1)) {
-                total += neighbors(placement[email], placement[w.want1]) ? 5 : 0;
+                let bonus = is_mutual_confirmed(email, w.want1) ? 25 : 5;
+                total += neighbors(placement[email], placement[w.want1]) ? bonus : 0;
             }
             if (w.want2_status === 'confirmed' && w.want2 && emails.includes(w.want2)) {
-                total += neighbors(placement[email], placement[w.want2]) ? 5 : 0;
+                let bonus = is_mutual_confirmed(email, w.want2) ? 25 : 5;
+                total += neighbors(placement[email], placement[w.want2]) ? bonus : 0;
+            }
+            if (w.want3_status === 'confirmed' && w.want3 && emails.includes(w.want3)) {
+                let bonus = is_mutual_confirmed(email, w.want3) ? 25 : 5;
+                total += neighbors(placement[email], placement[w.want3]) ? bonus : 0;
             }
             if (w.avoid1_status === 'confirmed' && w.avoid1 && emails.includes(w.avoid1)) {
                 total -= neighbors(placement[email], placement[w.avoid1]) ? 10 : 0;
@@ -410,32 +430,83 @@ function generate_plan() {
         return total;
     }
 
-    let current_score = score();
-    for (let iter = 0; iter < 3000; iter++) {
+    let current_score = score(placement);
+    for (let iter = 0; iter < 4000; iter++) {
         if (swappable.length < 2) break;
         let i = swappable[Math.floor(Math.random() * swappable.length)];
         let j = swappable[Math.floor(Math.random() * swappable.length)];
         if (i === j) continue;
         let tmp = placement[i]; placement[i] = placement[j]; placement[j] = tmp;
-        let new_score = score();
+        let new_score = score(placement);
         if (new_score >= current_score) {
             current_score = new_score;
         } else {
             let tmp2 = placement[i]; placement[i] = placement[j]; placement[j] = tmp2;
         }
     }
+    return {placement: placement, score: current_score};
+}
 
+function generate_plan() {
+    let emails = sus.map(s => s.email);
+    if (emails.length > seats.length) {
+        alert(`Diese Klasse hat ${emails.length} SuS, aber Raum ${raum} nur ${seats.length} Plätze.`);
+        return;
+    }
+
+    // Mehrere unabhängige Zufalls-Durchläufe, besten Score behalten - ein
+    // einzelner Durchlauf kann in einem mittelmäßigen lokalen Optimum
+    // hängenbleiben, gerade bei vielen SuS mit überlappenden Wünschen.
+    let best = null;
+    const RESTARTS = 10;
+    for (let attempt = 0; attempt < RESTARTS; attempt++) {
+        let result = build_and_optimize_once(emails);
+        if (!best || result.score > best.score) best = result;
+    }
+    let placement = best.placement;
+
+    let failures = [];
+    let confirmed_total = 0, confirmed_ok = 0;
+    for (let rule of fixed_rules) {
+        let [email, xr, yr] = rule;
+        if (!emails.includes(email)) continue;
+        let seat = seats[placement[email]];
+        if (!(seat[0] >= xr[0] && seat[0] <= xr[1] && seat[1] >= yr[0] && seat[1] <= yr[1])) {
+            failures.push({email: email, reason: 'feste Platzvorgabe nicht erfüllbar'});
+        }
+    }
+    for (let [a, b] of forced_pairs) {
+        if (!emails.includes(a) || !emails.includes(b)) continue;
+        if (!neighbors(placement[a], placement[b])) {
+            failures.push({email: a, reason: `Zwangspaar mit ${display_name(b)} nicht erfüllbar`});
+            failures.push({email: b, reason: `Zwangspaar mit ${display_name(a)} nicht erfüllbar`});
+        }
+    }
+    // Zusätzlich zur reinen Wunsch-Slot-Quote: Wie viele SuS mit mindestens
+    // einem bestätigten Wunschpartner haben am Ende auch mindestens einen
+    // davon tatsächlich als Tischnachbarn bekommen ("zufrieden")?
+    let students_with_want = new Set();
+    let students_satisfied = new Set();
     for (let email in wishes) {
         if (!emails.includes(email)) continue;
         let w = wishes[email];
-        if (w.want1_status === 'confirmed' && w.want1 && emails.includes(w.want1) && !neighbors(placement[email], placement[w.want1])) {
-            failures.push({email: email, reason: `Wunsch mit ${display_name(w.want1)} nicht erfüllt`});
+        for (let slot of ['want1', 'want2', 'want3']) {
+            let target = w[slot], status = w[slot + '_status'];
+            if (status === 'confirmed' && target && emails.includes(target)) {
+                confirmed_total++;
+                students_with_want.add(email);
+                if (neighbors(placement[email], placement[target])) {
+                    confirmed_ok++;
+                    students_satisfied.add(email);
+                } else {
+                    failures.push({email: email, reason: `Wunsch mit ${display_name(target)} nicht erfüllt`});
+                }
+            }
         }
-        if (w.want2_status === 'confirmed' && w.want2 && emails.includes(w.want2) && !neighbors(placement[email], placement[w.want2])) {
-            failures.push({email: email, reason: `Wunsch mit ${display_name(w.want2)} nicht erfüllt`});
-        }
-        if (w.avoid1_status === 'confirmed' && w.avoid1 && emails.includes(w.avoid1) && neighbors(placement[email], placement[w.avoid1])) {
-            failures.push({email: email, reason: `sitzt trotzdem neben ${display_name(w.avoid1)}`});
+        if (w.avoid1_status === 'confirmed' && w.avoid1 && emails.includes(w.avoid1)) {
+            confirmed_total++;
+            if (!neighbors(placement[email], placement[w.avoid1])) confirmed_ok++;
+            else failures.push({email: email, reason: `sitzt trotzdem neben ${display_name(w.avoid1)}`});
         }
     }
     for (let [a, b] of forbidden_pairs) {
@@ -447,6 +518,10 @@ function generate_plan() {
 
     current_placement = placement;
     current_unresolved = failures;
+    current_satisfaction = {
+        ok: confirmed_ok, total: confirmed_total,
+        students_with_want: students_with_want.size, students_satisfied: students_satisfied.size,
+    };
     render_placement();
 }
 
@@ -469,13 +544,19 @@ function render_placement() {
         div.append($('<div>').addClass('sph-name').text(display_name(email)));
         container.append(div);
     }
+    let rate_html = '';
+    if (current_satisfaction.students_with_want > 0) {
+        let pct = Math.round(100 * current_satisfaction.students_satisfied / current_satisfaction.students_with_want);
+        rate_html = `<p><strong>${current_satisfaction.students_satisfied} von ${current_satisfaction.students_with_want} SuS mit Wunsch (${pct}%)</strong> ` +
+            `haben mindestens einen ihrer bestätigten Wunschpartner tatsächlich als Tischnachbarn bekommen.</p>`;
+    }
     if (current_unresolved.length > 0) {
         let byEmail = {};
         current_unresolved.forEach(f => { byEmail[f.email] = byEmail[f.email] || []; byEmail[f.email].push(f.reason); });
         let lines = Object.keys(byEmail).map(e => `${display_name(e)}: ${byEmail[e].join(', ')}`);
-        $('#sph_unresolved_summary').html('<strong>Nicht erfüllte Vorgaben:</strong><br>' + lines.join('<br>'));
+        $('#sph_unresolved_summary').html(rate_html + '<strong>Nicht erfüllte Vorgaben:</strong><br>' + lines.join('<br>'));
     } else {
-        $('#sph_unresolved_summary').text('Alle bestätigten Wünsche und Vorgaben konnten erfüllt werden.');
+        $('#sph_unresolved_summary').html(rate_html + 'Alle bestätigten Wünsche und Vorgaben konnten erfüllt werden.');
     }
     $('#sph_bu_save').show();
 }
