@@ -1,0 +1,321 @@
+class Main < Sinatra::Base
+
+    # Darf diese Person den Sitzplanhelfer für die angegebene Klasse benutzen?
+    # Gleiches Muster wie z. B. die /directory/:klasse-Route in main.rb.
+    def sph_can_manage?(klasse)
+        admin_logged_in? || can_see_all_timetables_logged_in? || (@@teachers_for_klasse[klasse] || {}).include?(@session_user[:shorthand])
+    end
+
+    def require_sph_access!(klasse)
+        require_teacher!
+        assert(sph_can_manage?(klasse), 'Kein Zugriff auf den Sitzplanhelfer für diese Klasse.')
+    end
+
+    # Hinweis: Ein eigener "hier ist dein Sitzplatzwunsch"-Banner ist nicht
+    # nötig - #{print_current_polls()} (poll.rb) zeigt jeder eingeloggten
+    # Person (auch SuS) bereits automatisch jede offene Umfrage an, bei der
+    # sie Teilnehmer:in ist, inkl. "Zur Umfrage"-Knopf. Da sph_start_cycle
+    # unten eine ganz normale PollRun mit IS_PARTICIPANT-Kanten anlegt,
+    # erscheint der Sitzplatzwunsch dort von selbst.
+
+    # Liest eine laufende Wunschrunde aus und löst die Umfrage-Antworten zu
+    # E-Mail-Adressen der Klasse auf. Umfrage-Antworten für radio/checkbox
+    # werden von _template.html als ANTWORT-INDIZES gespeichert (Index in
+    # item['answers']), nicht als Namens-Strings - siehe collect_poll_run_data()
+    # in _template.html.
+    def sph_read_wishes(klasse, cycle, poll_run_items)
+        sus_emails = @@schueler_for_klasse[klasse] || []
+        name_to_email = {}
+        sus_emails.each { |e| name_to_email[@@user_info[e][:display_name_official]] = e }
+        want_answers = (poll_run_items[0] || {})['answers'] || []
+        avoid_answers = (poll_run_items[1] || {})['answers'] || []
+
+        status_by_email = {}
+        neo4j_query(<<~END_OF_QUERY, :cycle_id => cycle[:id]).each do |row|
+            MATCH (sw:SeatWish)-[:FOR_CYCLE]->(:SeatingCycle {id: $cycle_id})
+            MATCH (sw)-[:BELONGS_TO_USER]->(u:User)
+            RETURN u.email AS email, sw;
+        END_OF_QUERY
+            status_by_email[row['email']] = row['sw']
+        end
+
+        wishes = {}
+        neo4j_query(<<~END_OF_QUERY, :prid => cycle[:poll_run_id]).each do |row|
+            MATCH (u:User)<-[:RESPONSE_BY]-(prs:PollResponse)-[:RESPONSE_TO]->(:PollRun {id: $prid})
+            RETURN u.email AS email, prs.response AS response;
+        END_OF_QUERY
+            email = row['email']
+            next unless sus_emails.include?(email)
+            response = JSON.parse(row['response'] || '{}')
+            want_indices = response['0'] || []
+            avoid_index = response['1']
+            wants = want_indices.map { |i| name_to_email[want_answers[i]] }.compact.reject { |e| e == email }
+            avoids = avoid_index.nil? ? [] : [name_to_email[avoid_answers[avoid_index]]].compact.reject { |e| e == email }
+            status = status_by_email[email] || {}
+            wishes[email] = {
+                :want1 => wants[0], :want1_status => status[:want1_status] || 'pending',
+                :want2 => wants[1], :want2_status => status[:want2_status] || 'pending',
+                :avoid1 => avoids[0], :avoid1_status => status[:avoid1_status] || 'pending',
+            }
+        end
+        wishes
+    end
+
+    post '/api/sph_start_cycle' do
+        require_teacher!
+        data = parse_request_data(:required_keys => [:klasse, :raum])
+        klasse = data[:klasse]
+        raum = data[:raum]
+        require_sph_access!(klasse)
+        sus_emails = @@schueler_for_klasse[klasse] || []
+        assert(sus_emails.size > 0, 'Diese Klasse hat keine SuS.')
+
+        existing = neo4j_query(<<~END_OF_QUERY, :klasse => klasse, :raum => raum)
+            MATCH (sc:SeatingCycle {klasse: $klasse, raum: $raum})
+            WHERE sc.saved_at IS NULL
+            RETURN sc
+            ORDER BY sc.created_at DESC
+            LIMIT 1;
+        END_OF_QUERY
+
+        if existing.size > 0
+            sc = existing.first['sc']
+            respond(:ok => true, :cycle_id => sc[:id], :poll_run_id => sc[:poll_run_id])
+        else
+            answers = sus_emails.map { |e| @@user_info[e][:display_name_official] }.sort
+            items = [
+                {'type' => 'checkbox', 'title' => 'Neben wem möchtest du gerne sitzen? (max. 2 Personen)', 'answers' => answers, 'max_checks' => 2},
+                {'type' => 'radio', 'title' => 'Neben wem möchtest du auf keinen Fall sitzen? (optional)', 'answers' => answers},
+            ]
+            poll_id = RandomTag.generate(12)
+            cycle_id = RandomTag.generate(12)
+            poll_run_id = RandomTag.generate(12)
+            timestamp = Time.now.to_i
+            now_date = Date.today.strftime('%Y-%m-%d')
+            now_time = Time.now.strftime('%H:%M')
+            end_date = (Date.today + 14).strftime('%Y-%m-%d')
+
+            transaction do
+                neo4j_query_expect_one(<<~END_OF_QUERY, :session_email => @session_user[:email], :timestamp => timestamp, :pid => poll_id, :title => "Sitzplatzwunsch #{klasse} (Raum #{raum})", :items => items.to_json)
+                    MATCH (a:User {email: $session_email})
+                    CREATE (p:Poll {id: $pid, title: $title, items: $items})
+                    SET p.created = $timestamp
+                    SET p.updated = $timestamp
+                    CREATE (p)-[:ORGANIZED_BY]->(a)
+                    RETURN p;
+                END_OF_QUERY
+                neo4j_query_expect_one(<<~END_OF_QUERY, :pid => poll_id, :prid => poll_run_id, :timestamp => timestamp, :items => items.to_json, :now_date => now_date, :now_time => now_time, :end_date => end_date)
+                    MATCH (p:Poll {id: $pid})
+                    CREATE (pr:PollRun {id: $prid, anonymous: false, start_date: $now_date, start_time: $now_time, end_date: $end_date, end_time: '23:59', visible: 'yes', items: $items})
+                    SET pr.created = $timestamp
+                    SET pr.updated = $timestamp
+                    CREATE (pr)-[:RUNS]->(p)
+                    RETURN pr;
+                END_OF_QUERY
+                neo4j_query(<<~END_OF_QUERY, :prid => poll_run_id, :emails => sus_emails)
+                    MATCH (pr:PollRun {id: $prid})
+                    WITH pr
+                    MATCH (u:User)
+                    WHERE u.email IN $emails
+                    CREATE (u)-[:IS_PARTICIPANT]->(pr);
+                END_OF_QUERY
+                neo4j_query_expect_one(<<~END_OF_QUERY, :session_email => @session_user[:email], :timestamp => timestamp, :id => cycle_id, :klasse => klasse, :raum => raum, :pid => poll_id, :prid => poll_run_id)
+                    MATCH (a:User {email: $session_email})
+                    CREATE (sc:SeatingCycle {id: $id, klasse: $klasse, raum: $raum, poll_id: $pid, poll_run_id: $prid, created_at: $timestamp, forced_pairs: '[]', forbidden_pairs: '[]', fixed_rules: '[]'})
+                    CREATE (sc)-[:STARTED_BY]->(a)
+                    RETURN sc;
+                END_OF_QUERY
+            end
+            respond(:ok => true, :cycle_id => cycle_id, :poll_run_id => poll_run_id)
+        end
+    end
+
+    post '/api/sph_close_wishes' do
+        require_teacher!
+        data = parse_request_data(:required_keys => [:cycle_id])
+        rows = neo4j_query(<<~END_OF_QUERY, :id => data[:cycle_id])
+            MATCH (sc:SeatingCycle {id: $id})
+            RETURN sc;
+        END_OF_QUERY
+        assert(rows.size > 0, 'Zyklus nicht gefunden.')
+        sc = rows.first['sc']
+        require_sph_access!(sc[:klasse])
+        now_date = Date.today.strftime('%Y-%m-%d')
+        now_time = (Time.now - 60).strftime('%H:%M')
+        neo4j_query(<<~END_OF_QUERY, :prid => sc[:poll_run_id], :now_date => now_date, :now_time => now_time)
+            MATCH (pr:PollRun {id: $prid})
+            SET pr.end_date = $now_date
+            SET pr.end_time = $now_time;
+        END_OF_QUERY
+        respond(:ok => true)
+    end
+
+    post '/api/sph_get_state' do
+        require_teacher!
+        data = parse_request_data(:required_keys => [:klasse, :raum])
+        klasse = data[:klasse]
+        raum = data[:raum]
+        require_sph_access!(klasse)
+
+        sus_emails = (@@schueler_for_klasse[klasse] || []).sort do |a, b|
+            @@user_info[a][:last_name].downcase <=> @@user_info[b][:last_name].downcase
+        end
+        sus = sus_emails.map { |e| {:email => e, :display_name => @@user_info[e][:display_name_official]} }
+
+        open_cycle = nil
+        wishes = {}
+        rows = neo4j_query(<<~END_OF_QUERY, :klasse => klasse, :raum => raum)
+            MATCH (sc:SeatingCycle {klasse: $klasse, raum: $raum})
+            WHERE sc.saved_at IS NULL
+            RETURN sc
+            ORDER BY sc.created_at DESC
+            LIMIT 1;
+        END_OF_QUERY
+        unless rows.empty?
+            sc = rows.first['sc']
+            pr_rows = neo4j_query(<<~END_OF_QUERY, :prid => sc[:poll_run_id])
+                MATCH (pr:PollRun {id: $prid})
+                RETURN pr;
+            END_OF_QUERY
+            pr = pr_rows.empty? ? nil : pr_rows.first['pr']
+            open_cycle = {
+                :id => sc[:id],
+                :poll_run_id => sc[:poll_run_id],
+                :start_date => pr && pr[:start_date],
+                :start_time => pr && pr[:start_time],
+                :end_date => pr && pr[:end_date],
+                :end_time => pr && pr[:end_time],
+                :forced_pairs => JSON.parse(sc[:forced_pairs] || '[]'),
+                :forbidden_pairs => JSON.parse(sc[:forbidden_pairs] || '[]'),
+                :fixed_rules => JSON.parse(sc[:fixed_rules] || '[]'),
+            }
+            wishes = sph_read_wishes(klasse, sc, pr ? JSON.parse(pr[:items]) : [])
+        end
+
+        last_cycle = nil
+        last_rows = neo4j_query(<<~END_OF_QUERY, :klasse => klasse, :raum => raum)
+            MATCH (sc:SeatingCycle {klasse: $klasse, raum: $raum})
+            WHERE sc.saved_at IS NOT NULL
+            RETURN sc
+            ORDER BY sc.saved_at DESC
+            LIMIT 1;
+        END_OF_QUERY
+        unless last_rows.empty?
+            sc = last_rows.first['sc']
+            last_cycle = {
+                :id => sc[:id],
+                :saved_at => sc[:saved_at],
+                :seats => JSON.parse(sc[:seats] || '{}'),
+            }
+        end
+
+        respond(:ok => true, :klasse => klasse, :raum => raum, :sus => sus,
+                :open_cycle => open_cycle, :wishes => wishes, :last_cycle => last_cycle)
+    end
+
+    post '/api/sph_set_wish_status' do
+        require_teacher!
+        data = parse_request_data(:required_keys => [:cycle_id, :email, :slot, :status])
+        assert(['want1_status', 'want2_status', 'avoid1_status'].include?(data[:slot]), 'Unbekannter Wunsch-Slot.')
+        assert(['pending', 'confirmed', 'rejected'].include?(data[:status]), 'Unbekannter Status.')
+        rows = neo4j_query(<<~END_OF_QUERY, :id => data[:cycle_id])
+            MATCH (sc:SeatingCycle {id: $id})
+            RETURN sc;
+        END_OF_QUERY
+        assert(rows.size > 0, 'Zyklus nicht gefunden.')
+        sc = rows.first['sc']
+        require_sph_access!(sc[:klasse])
+        slot = data[:slot]
+        neo4j_query(<<~END_OF_QUERY, :cycle_id => data[:cycle_id], :email => data[:email], :status => data[:status])
+            MATCH (sc:SeatingCycle {id: $cycle_id})
+            MATCH (u:User {email: $email})
+            MERGE (u)<-[:BELONGS_TO_USER]-(sw:SeatWish)-[:FOR_CYCLE]->(sc)
+            SET sw.#{slot} = $status;
+        END_OF_QUERY
+        respond(:ok => true)
+    end
+
+    def sph_load_cycle_for_edit!(cycle_id)
+        rows = neo4j_query(<<~END_OF_QUERY, :id => cycle_id)
+            MATCH (sc:SeatingCycle {id: $id})
+            RETURN sc;
+        END_OF_QUERY
+        assert(rows.size > 0, 'Zyklus nicht gefunden.')
+        sc = rows.first['sc']
+        require_sph_access!(sc[:klasse])
+        sc
+    end
+
+    post '/api/sph_set_pair' do
+        require_teacher!
+        data = parse_request_data(:required_keys => [:cycle_id, :email_a, :email_b, :kind])
+        assert(['forced', 'forbidden'].include?(data[:kind]), 'Unbekannte Paar-Art.')
+        sc = sph_load_cycle_for_edit!(data[:cycle_id])
+        prop = data[:kind] == 'forced' ? :forced_pairs : :forbidden_pairs
+        pairs = JSON.parse(sc[prop] || '[]')
+        pairs << [data[:email_a], data[:email_b]] unless pairs.any? { |p| p.sort == [data[:email_a], data[:email_b]].sort }
+        neo4j_query(<<~END_OF_QUERY, :id => data[:cycle_id], :value => pairs.to_json)
+            MATCH (sc:SeatingCycle {id: $id})
+            SET sc.#{prop} = $value;
+        END_OF_QUERY
+        respond(:ok => true, :pairs => pairs)
+    end
+
+    post '/api/sph_remove_pair' do
+        require_teacher!
+        data = parse_request_data(:required_keys => [:cycle_id, :email_a, :email_b, :kind])
+        assert(['forced', 'forbidden'].include?(data[:kind]), 'Unbekannte Paar-Art.')
+        sc = sph_load_cycle_for_edit!(data[:cycle_id])
+        prop = data[:kind] == 'forced' ? :forced_pairs : :forbidden_pairs
+        pairs = JSON.parse(sc[prop] || '[]')
+        pairs.reject! { |p| p.sort == [data[:email_a], data[:email_b]].sort }
+        neo4j_query(<<~END_OF_QUERY, :id => data[:cycle_id], :value => pairs.to_json)
+            MATCH (sc:SeatingCycle {id: $id})
+            SET sc.#{prop} = $value;
+        END_OF_QUERY
+        respond(:ok => true, :pairs => pairs)
+    end
+
+    post '/api/sph_set_fixed_rule' do
+        require_teacher!
+        data = parse_request_data(:required_keys => [:cycle_id, :email, :x_min, :x_max, :y_min, :y_max],
+                                  :types => {:x_min => Integer, :x_max => Integer, :y_min => Integer, :y_max => Integer})
+        sc = sph_load_cycle_for_edit!(data[:cycle_id])
+        rules = JSON.parse(sc[:fixed_rules] || '[]')
+        rules.reject! { |r| r[0] == data[:email] }
+        rules << [data[:email], [data[:x_min], data[:x_max]], [data[:y_min], data[:y_max]]]
+        neo4j_query(<<~END_OF_QUERY, :id => data[:cycle_id], :value => rules.to_json)
+            MATCH (sc:SeatingCycle {id: $id})
+            SET sc.fixed_rules = $value;
+        END_OF_QUERY
+        respond(:ok => true, :rules => rules)
+    end
+
+    post '/api/sph_remove_fixed_rule' do
+        require_teacher!
+        data = parse_request_data(:required_keys => [:cycle_id, :email])
+        sc = sph_load_cycle_for_edit!(data[:cycle_id])
+        rules = JSON.parse(sc[:fixed_rules] || '[]')
+        rules.reject! { |r| r[0] == data[:email] }
+        neo4j_query(<<~END_OF_QUERY, :id => data[:cycle_id], :value => rules.to_json)
+            MATCH (sc:SeatingCycle {id: $id})
+            SET sc.fixed_rules = $value;
+        END_OF_QUERY
+        respond(:ok => true, :rules => rules)
+    end
+
+    post '/api/sph_save_cycle' do
+        require_teacher!
+        data = parse_request_data(:required_keys => [:cycle_id, :seats, :unresolved],
+                                  :max_body_length => 256 * 1024, :max_string_length => 256 * 1024)
+        sc = sph_load_cycle_for_edit!(data[:cycle_id])
+        timestamp = Time.now.to_i
+        neo4j_query(<<~END_OF_QUERY, :id => data[:cycle_id], :seats => data[:seats], :unresolved => data[:unresolved], :timestamp => timestamp)
+            MATCH (sc:SeatingCycle {id: $id})
+            SET sc.seats = $seats
+            SET sc.unresolved = $unresolved
+            SET sc.saved_at = $timestamp;
+        END_OF_QUERY
+        respond(:ok => true)
+    end
+end

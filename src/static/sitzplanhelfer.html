@@ -1,0 +1,548 @@
+#{redirect_on_error { require_teacher! }}
+<style>
+.sph-container {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 1em;
+}
+.sph-section {
+    margin-bottom: 2em;
+}
+.sph-section h4 {
+    margin-bottom: 0.6em;
+}
+table.sph-wishes td, table.sph-wishes th {
+    vertical-align: middle;
+    padding: 0.3em 0.6em;
+}
+.sph-status-btn {
+    cursor: pointer;
+    opacity: 0.35;
+    margin: 0 2px;
+}
+.sph-status-btn.active {
+    opacity: 1;
+}
+.sph-status-btn.confirm.active { color: #2e7d32; }
+.sph-status-btn.reject.active { color: #c62828; }
+.sph-pair-list span.pair-chip, .sph-rule-list span.rule-chip {
+    display: inline-block;
+    background: #eee;
+    border-radius: 1em;
+    padding: 0.2em 0.8em;
+    margin: 0.2em;
+}
+.sph-pair-list span.pair-chip a, .sph-rule-list span.rule-chip a {
+    margin-left: 0.5em;
+    cursor: pointer;
+    color: #c62828;
+}
+#sph_seats {
+    position: relative;
+    margin: 2em auto;
+    width: 100px;
+    height: 100px;
+}
+#sph_seats .place {
+    position: absolute;
+    width: 5vh;
+    height: 5vh;
+    box-shadow: 0 0 0.7vh rgba(0,0,0,0.5);
+    background-color: #fff;
+    border-radius: 1vh;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    font-size: 1.3vh;
+    border: 3px solid transparent;
+    transition: left 0.4s ease-out, top 0.4s ease-out;
+}
+#sph_seats .place.unresolved {
+    border-color: #e6a700;
+    background-color: #fff6df;
+}
+#sph_seats .place .sph-name {
+    padding: 2px;
+    word-break: break-word;
+}
+.sph-legend {
+    font-size: 0.9em;
+    color: #666;
+}
+</style>
+<div class="sph-container">
+    <h1>Sitzplanhelfer <span id='sph_label'></span></h1>
+    <p class="text-muted">Wunschbasierte Sitzordnung – neben dem <a href="#" id="sph_link_shuffler">Sitzplan-Shuffler</a>.</p>
+
+    <div class="sph-section" id="sph_cycle_controls">
+        <button class="btn btn-success" id="sph_bu_start_cycle">Wunschrunde starten</button>
+        <button class="btn btn-outline-secondary" id="sph_bu_close_wishes" style="display: none;">Wunschrunde schließen</button>
+        <span id="sph_cycle_info" class="sph-legend"></span>
+    </div>
+
+    <div class="sph-section" id="sph_wishes_section" style="display: none;">
+        <h4>Wünsche der Schüler:innen</h4>
+        <p class="sph-legend">Grüner Haken = Wunsch bestätigt (fließt in die Planung ein), rotes Kreuz = abgelehnt (wird ignoriert). Standardmäßig unentschieden.</p>
+        <table class="table table-sm sph-wishes">
+            <thead>
+                <tr><th>Name</th><th>Wunschpartner 1</th><th></th><th>Wunschpartner 2</th><th></th><th>Nicht neben</th><th></th></tr>
+            </thead>
+            <tbody id="sph_wishes_body"></tbody>
+        </table>
+    </div>
+
+    <div class="sph-section">
+        <h4>Zwangspaare (Lehrkraft)</h4>
+        <div class="form-inline">
+            <select class="form-control" id="sph_pair_a"></select>
+            <span>&nbsp;und&nbsp;</span>
+            <select class="form-control" id="sph_pair_b"></select>
+            <button class="btn btn-sm btn-success" id="sph_bu_add_forced" style="margin-left: 0.5em;">müssen zusammensitzen</button>
+            <button class="btn btn-sm btn-danger" id="sph_bu_add_forbidden" style="margin-left: 0.5em;">dürfen nicht zusammensitzen</button>
+        </div>
+        <div class="sph-pair-list" id="sph_forced_list"><strong>Muss zusammen:</strong> <span class="none-hint">keine</span></div>
+        <div class="sph-pair-list" id="sph_forbidden_list"><strong>Darf nicht zusammen:</strong> <span class="none-hint">keine</span></div>
+    </div>
+
+    <div class="sph-section">
+        <h4>Feste Plätze</h4>
+        <div class="form-inline">
+            <select class="form-control" id="sph_rule_sus"></select>
+            <select class="form-control" id="sph_rule_area" style="margin-left: 0.5em;">
+                <option value="front">vorne</option>
+                <option value="back">hinten</option>
+                <option value="left">links</option>
+                <option value="right">rechts</option>
+                <option value="any">überall (keine Einschränkung mehr)</option>
+            </select>
+            <button class="btn btn-sm btn-primary" id="sph_bu_add_rule" style="margin-left: 0.5em;">festlegen</button>
+        </div>
+        <div class="sph-rule-list" id="sph_rules_list"><span class="none-hint">keine festen Plätze</span></div>
+    </div>
+
+    <div class="sph-section">
+        <button class="btn btn-lg btn-primary" id="sph_bu_generate">Sitzplan erzeugen</button>
+        <button class="btn btn-lg btn-success" id="sph_bu_save" style="display: none;">Sitzplan speichern</button>
+        <span id="sph_unresolved_summary" class="text-warning" style="display: block; margin-top: 0.5em;"></span>
+    </div>
+
+    <div id="sph_seats"></div>
+</div>
+
+<script>
+
+var klasse = '';
+var raum = '';
+var seats = [];
+var seats_dict = {};
+var sus = [];
+var wishes = {};
+var forced_pairs = [];
+var forbidden_pairs = [];
+var fixed_rules = [];
+var last_seats = {};
+var open_cycle_id = null;
+var current_placement = {};
+var current_unresolved = [];
+
+#{File.read('/data/sitzplan/seats.js')}
+
+function display_name(email) {
+    let s = sus.find(x => x.email === email);
+    return s ? s.display_name : email;
+}
+
+function room_width_height() {
+    let w = 1, h = 1;
+    for (let s of seats) {
+        if (s[0] + 1 > w) w = s[0] + 1;
+        if (s[1] + 1 > h) h = s[1] + 1;
+    }
+    return [w, h];
+}
+
+function room_mid_y() {
+    let maxY = 0;
+    for (let s of seats) if (s[1] > maxY) maxY = s[1];
+    return maxY / 2.0;
+}
+
+function neighbors(seatIndexA, seatIndexB) {
+    if (seatIndexA === undefined || seatIndexB === undefined) return false;
+    let a = seats[seatIndexA], b = seats[seatIndexB];
+    return a[1] === b[1] && Math.abs(a[0] - b[0]) === 1;
+}
+
+function shuffle_array(arr) {
+    arr = arr.slice();
+    for (let i = arr.length - 1; i > 0; i--) {
+        let j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+}
+
+function area_for_rule(area) {
+    let [w, h] = room_width_height();
+    let midX = (w - 1) / 2.0;
+    let midY = (h - 1) / 2.0;
+    if (area === 'front') return [[0, w - 1], [0, Math.floor(midY)]];
+    if (area === 'back') return [[0, w - 1], [Math.ceil(midY), h - 1]];
+    if (area === 'left') return [[0, Math.floor(midX)], [0, h - 1]];
+    if (area === 'right') return [[Math.ceil(midX), w - 1], [0, h - 1]];
+    return [[0, w - 1], [0, h - 1]];
+}
+
+function refresh_dropdowns() {
+    let opts = sus.map(s => `<option value="${s.email}">${s.display_name}</option>`).join('');
+    $('#sph_pair_a, #sph_pair_b, #sph_rule_sus').html(opts);
+}
+
+function render_pairs() {
+    function render_list(el, pairs, kind) {
+        if (pairs.length === 0) {
+            $(el).html(`<strong>${kind === 'forced' ? 'Muss zusammen' : 'Darf nicht zusammen'}:</strong> <span class="none-hint">keine</span>`);
+            return;
+        }
+        let html = `<strong>${kind === 'forced' ? 'Muss zusammen' : 'Darf nicht zusammen'}:</strong> `;
+        for (let [a, b] of pairs) {
+            html += `<span class="pair-chip">${display_name(a)} + ${display_name(b)}<a data-a="${a}" data-b="${b}" data-kind="${kind}" class="bu-remove-pair">&times;</a></span>`;
+        }
+        $(el).html(html);
+    }
+    render_list('#sph_forced_list', forced_pairs, 'forced');
+    render_list('#sph_forbidden_list', forbidden_pairs, 'forbidden');
+    $('.bu-remove-pair').off('click').on('click', function (e) {
+        let a = $(this).data('a'), b = $(this).data('b'), kind = $(this).data('kind');
+        api_call('/api/sph_remove_pair', {cycle_id: open_cycle_id, email_a: a, email_b: b, kind: kind}, function (data) {
+            forced_pairs = kind === 'forced' ? data.pairs : forced_pairs;
+            forbidden_pairs = kind === 'forbidden' ? data.pairs : forbidden_pairs;
+            render_pairs();
+        });
+    });
+}
+
+function render_rules() {
+    if (fixed_rules.length === 0) {
+        $('#sph_rules_list').html('<span class="none-hint">keine festen Plätze</span>');
+        return;
+    }
+    let html = '';
+    for (let r of fixed_rules) {
+        html += `<span class="rule-chip">${display_name(r[0])}<a data-email="${r[0]}" class="bu-remove-rule">&times;</a></span>`;
+    }
+    $('#sph_rules_list').html(html);
+    $('.bu-remove-rule').off('click').on('click', function (e) {
+        let email = $(this).data('email');
+        api_call('/api/sph_remove_fixed_rule', {cycle_id: open_cycle_id, email: email}, function (data) {
+            fixed_rules = data.rules;
+            render_rules();
+        });
+    });
+}
+
+function render_wishes() {
+    if (!open_cycle_id) {
+        $('#sph_wishes_section').hide();
+        return;
+    }
+    $('#sph_wishes_section').show();
+    let rows = '';
+    for (let s of sus) {
+        let w = wishes[s.email] || {};
+        function cell(field, statusField) {
+            if (!w[field]) return '<td>-</td><td></td>';
+            let name = display_name(w[field]);
+            let status = w[statusField] || 'pending';
+            return `<td>${name}</td><td style="white-space: nowrap;">` +
+                `<i class="fa fa-check sph-status-btn confirm ${status === 'confirmed' ? 'active' : ''}" data-email="${s.email}" data-slot="${statusField}" data-status="confirmed"></i>` +
+                `<i class="fa fa-times sph-status-btn reject ${status === 'rejected' ? 'active' : ''}" data-email="${s.email}" data-slot="${statusField}" data-status="rejected"></i>` +
+                `</td>`;
+        }
+        rows += `<tr><td>${s.display_name}</td>${cell('want1', 'want1_status')}${cell('want2', 'want2_status')}${cell('avoid1', 'avoid1_status')}</tr>`;
+    }
+    $('#sph_wishes_body').html(rows);
+    $('.sph-status-btn').off('click').on('click', function (e) {
+        let email = $(this).data('email'), slot = $(this).data('slot'), status = $(this).data('status');
+        let current = (wishes[email] || {})[slot] || 'pending';
+        let new_status = current === status ? 'pending' : status;
+        api_call('/api/sph_set_wish_status', {cycle_id: open_cycle_id, email: email, slot: slot, status: new_status}, function (data) {
+            wishes[email] = wishes[email] || {};
+            wishes[email][slot] = new_status;
+            render_wishes();
+        });
+    });
+}
+
+function load_state() {
+    api_call('/api/sph_get_state', {klasse: klasse, raum: raum}, function (data) {
+        sus = data.sus;
+        wishes = data.wishes || {};
+        refresh_dropdowns();
+        if (data.open_cycle) {
+            open_cycle_id = data.open_cycle.id;
+            forced_pairs = data.open_cycle.forced_pairs || [];
+            forbidden_pairs = data.open_cycle.forbidden_pairs || [];
+            fixed_rules = data.open_cycle.fixed_rules || [];
+            $('#sph_bu_start_cycle').hide();
+            $('#sph_bu_close_wishes').show();
+            $('#sph_cycle_info').text(`Wunschrunde läuft (Umfrage bis ${data.open_cycle.end_date}).`);
+        } else {
+            open_cycle_id = null;
+            forced_pairs = []; forbidden_pairs = []; fixed_rules = [];
+            $('#sph_bu_start_cycle').show();
+            $('#sph_bu_close_wishes').hide();
+            $('#sph_cycle_info').text('Keine Wunschrunde offen.');
+        }
+        last_seats = (data.last_cycle && data.last_cycle.seats) || {};
+        render_pairs();
+        render_rules();
+        render_wishes();
+    });
+}
+
+function generate_plan() {
+    let emails = sus.map(s => s.email);
+    if (emails.length > seats.length) {
+        alert(`Diese Klasse hat ${emails.length} SuS, aber Raum ${raum} nur ${seats.length} Plätze.`);
+        return;
+    }
+    let placement = {};
+    let placed = new Set();
+    let available = seats.map((s, i) => i);
+    let failures = [];
+
+    function try_place_in_range(email, xr, yr) {
+        let candidates = available.filter(i => seats[i][0] >= xr[0] && seats[i][0] <= xr[1] && seats[i][1] >= yr[0] && seats[i][1] <= yr[1]);
+        if (candidates.length === 0) return false;
+        let idx = candidates[Math.floor(Math.random() * candidates.length)];
+        placement[email] = idx;
+        available = available.filter(i => i !== idx);
+        placed.add(email);
+        return true;
+    }
+
+    for (let rule of fixed_rules) {
+        let [email, xr, yr] = rule;
+        if (!emails.includes(email)) continue;
+        if (!try_place_in_range(email, xr, yr)) {
+            failures.push({email: email, reason: 'feste Platzvorgabe nicht erfüllbar'});
+        }
+    }
+
+    for (let [a, b] of forced_pairs) {
+        if (!emails.includes(a) || !emails.includes(b)) continue;
+        if (placed.has(a) && placed.has(b)) continue;
+        if (placed.has(a) || placed.has(b)) {
+            failures.push({email: a, reason: `Zwangspaar mit ${display_name(b)} nicht erfüllbar (fester Platz im Weg)`});
+            failures.push({email: b, reason: `Zwangspaar mit ${display_name(a)} nicht erfüllbar (fester Platz im Weg)`});
+            continue;
+        }
+        let found = false;
+        for (let i of shuffle_array(available)) {
+            let s = seats[i];
+            let opts = [[s[0] + 1, s[1]], [s[0] - 1, s[1]]];
+            for (let nc of opts) {
+                let j = available.find(k => seats[k][0] === nc[0] && seats[k][1] === nc[1]);
+                if (j !== undefined) {
+                    placement[a] = i; placement[b] = j;
+                    available = available.filter(k => k !== i && k !== j);
+                    placed.add(a); placed.add(b);
+                    found = true;
+                    break;
+                }
+            }
+            if (found) break;
+        }
+        if (!found) {
+            failures.push({email: a, reason: `Zwangspaar mit ${display_name(b)} nicht erfüllbar (kein freier Nachbarplatz)`});
+            failures.push({email: b, reason: `Zwangspaar mit ${display_name(a)} nicht erfüllbar (kein freier Nachbarplatz)`});
+        }
+    }
+
+    let remaining = shuffle_array(emails.filter(e => !placed.has(e)));
+    for (let email of remaining) {
+        let idx = available[Math.floor(Math.random() * available.length)];
+        placement[email] = idx;
+        available = available.filter(i => i !== idx);
+        placed.add(email);
+    }
+
+    let mid = room_mid_y();
+    let locked = new Set();
+    for (let r of fixed_rules) locked.add(r[0]);
+    for (let [a, b] of forced_pairs) { locked.add(a); locked.add(b); }
+    let swappable = emails.filter(e => !locked.has(e));
+
+    function score() {
+        let total = 0;
+        for (let email in wishes) {
+            if (!emails.includes(email)) continue;
+            let w = wishes[email];
+            if (w.want1_status === 'confirmed' && w.want1 && emails.includes(w.want1)) {
+                total += neighbors(placement[email], placement[w.want1]) ? 5 : 0;
+            }
+            if (w.want2_status === 'confirmed' && w.want2 && emails.includes(w.want2)) {
+                total += neighbors(placement[email], placement[w.want2]) ? 5 : 0;
+            }
+            if (w.avoid1_status === 'confirmed' && w.avoid1 && emails.includes(w.avoid1)) {
+                total -= neighbors(placement[email], placement[w.avoid1]) ? 10 : 0;
+            }
+        }
+        for (let [a, b] of forbidden_pairs) {
+            if (emails.includes(a) && emails.includes(b)) {
+                total -= neighbors(placement[a], placement[b]) ? 10 : 0;
+            }
+        }
+        for (let email of emails) {
+            if (locked.has(email)) continue;
+            // last_seats[email] ist der Feld-Index aus dem zuletzt gespeicherten
+            // Plan (siehe render_placement/sph_save_cycle) - erst in [x,y] auflösen.
+            let prev_idx = last_seats[email];
+            if (prev_idx === undefined || !seats[prev_idx]) continue;
+            let was_front = seats[prev_idx][1] < mid;
+            let now_front = seats[placement[email]][1] < mid;
+            if (was_front && !now_front) total += 2;
+            if (was_front && now_front) total -= 2;
+        }
+        return total;
+    }
+
+    let current_score = score();
+    for (let iter = 0; iter < 3000; iter++) {
+        if (swappable.length < 2) break;
+        let i = swappable[Math.floor(Math.random() * swappable.length)];
+        let j = swappable[Math.floor(Math.random() * swappable.length)];
+        if (i === j) continue;
+        let tmp = placement[i]; placement[i] = placement[j]; placement[j] = tmp;
+        let new_score = score();
+        if (new_score >= current_score) {
+            current_score = new_score;
+        } else {
+            let tmp2 = placement[i]; placement[i] = placement[j]; placement[j] = tmp2;
+        }
+    }
+
+    for (let email in wishes) {
+        if (!emails.includes(email)) continue;
+        let w = wishes[email];
+        if (w.want1_status === 'confirmed' && w.want1 && emails.includes(w.want1) && !neighbors(placement[email], placement[w.want1])) {
+            failures.push({email: email, reason: `Wunsch mit ${display_name(w.want1)} nicht erfüllt`});
+        }
+        if (w.want2_status === 'confirmed' && w.want2 && emails.includes(w.want2) && !neighbors(placement[email], placement[w.want2])) {
+            failures.push({email: email, reason: `Wunsch mit ${display_name(w.want2)} nicht erfüllt`});
+        }
+        if (w.avoid1_status === 'confirmed' && w.avoid1 && emails.includes(w.avoid1) && neighbors(placement[email], placement[w.avoid1])) {
+            failures.push({email: email, reason: `sitzt trotzdem neben ${display_name(w.avoid1)}`});
+        }
+    }
+    for (let [a, b] of forbidden_pairs) {
+        if (emails.includes(a) && emails.includes(b) && neighbors(placement[a], placement[b])) {
+            failures.push({email: a, reason: `sitzt trotzdem neben ${display_name(b)}`});
+            failures.push({email: b, reason: `sitzt trotzdem neben ${display_name(a)}`});
+        }
+    }
+
+    current_placement = placement;
+    current_unresolved = failures;
+    render_placement();
+}
+
+function render_placement() {
+    let [w, h] = room_width_height();
+    let container = $('#sph_seats');
+    container.empty();
+    // Pixelbasierte Skalierung (wie sitzplan.html), passend zur .sph-container-Breite.
+    let container_width = Math.min($('.sph-container').width() || 900, 900);
+    let scale = Math.min(90, container_width / w);
+    container.css('position', 'relative').css('height', `${h * scale}px`).css('width', `${w * scale}px`);
+    let unresolved_emails = new Set(current_unresolved.map(f => f.email));
+    for (let email in current_placement) {
+        let seat = seats[current_placement[email]];
+        let div = $('<div>').addClass('place').css('left', `${seat[0] * scale}px`).css('top', `${seat[1] * scale}px`)
+            .css('width', `${scale * 0.9}px`).css('height', `${scale * 0.9}px`);
+        if (unresolved_emails.has(email)) div.addClass('unresolved');
+        let reasons = current_unresolved.filter(f => f.email === email).map(f => f.reason).join('; ');
+        if (reasons) div.attr('title', reasons);
+        div.append($('<div>').addClass('sph-name').text(display_name(email)));
+        container.append(div);
+    }
+    if (current_unresolved.length > 0) {
+        let byEmail = {};
+        current_unresolved.forEach(f => { byEmail[f.email] = byEmail[f.email] || []; byEmail[f.email].push(f.reason); });
+        let lines = Object.keys(byEmail).map(e => `${display_name(e)}: ${byEmail[e].join(', ')}`);
+        $('#sph_unresolved_summary').html('<strong>Nicht erfüllte Vorgaben:</strong><br>' + lines.join('<br>'));
+    } else {
+        $('#sph_unresolved_summary').text('Alle bestätigten Wünsche und Vorgaben konnten erfüllt werden.');
+    }
+    $('#sph_bu_save').show();
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    let parts = window.location.pathname.replace('/sitzplanhelfer/', '').split('/');
+    klasse = parts[0];
+    raum = parts[1];
+    seats = seats_dict[raum];
+    if (!seats) {
+        window.location.href = '/';
+        return;
+    }
+    $('#sph_label').text(`${klasse} – Raum ${raum}`);
+    $('#sph_link_shuffler').attr('href', `/sitzplan/${klasse}/${raum}`);
+
+    $('#sph_bu_start_cycle').click(function () {
+        api_call('/api/sph_start_cycle', {klasse: klasse, raum: raum}, function (data) {
+            load_state();
+        });
+    });
+    $('#sph_bu_close_wishes').click(function () {
+        api_call('/api/sph_close_wishes', {cycle_id: open_cycle_id}, function (data) {
+            load_state();
+        });
+    });
+    $('#sph_bu_add_forced').click(function () {
+        let a = $('#sph_pair_a').val(), b = $('#sph_pair_b').val();
+        if (a === b) { alert('Bitte zwei unterschiedliche Personen wählen.'); return; }
+        api_call('/api/sph_set_pair', {cycle_id: open_cycle_id, email_a: a, email_b: b, kind: 'forced'}, function (data) {
+            forced_pairs = data.pairs;
+            render_pairs();
+        });
+    });
+    $('#sph_bu_add_forbidden').click(function () {
+        let a = $('#sph_pair_a').val(), b = $('#sph_pair_b').val();
+        if (a === b) { alert('Bitte zwei unterschiedliche Personen wählen.'); return; }
+        api_call('/api/sph_set_pair', {cycle_id: open_cycle_id, email_a: a, email_b: b, kind: 'forbidden'}, function (data) {
+            forbidden_pairs = data.pairs;
+            render_pairs();
+        });
+    });
+    $('#sph_bu_add_rule').click(function () {
+        let email = $('#sph_rule_sus').val();
+        let area = $('#sph_rule_area').val();
+        if (area === 'any') {
+            api_call('/api/sph_remove_fixed_rule', {cycle_id: open_cycle_id, email: email}, function (data) {
+                fixed_rules = data.rules;
+                render_rules();
+            });
+        } else {
+            let [xr, yr] = area_for_rule(area);
+            api_call('/api/sph_set_fixed_rule', {cycle_id: open_cycle_id, email: email, x_min: xr[0], x_max: xr[1], y_min: yr[0], y_max: yr[1]}, function (data) {
+                fixed_rules = data.rules;
+                render_rules();
+            });
+        }
+    });
+    $('#sph_bu_generate').click(function () {
+        generate_plan();
+    });
+    $('#sph_bu_save').click(function () {
+        api_call('/api/sph_save_cycle', {cycle_id: open_cycle_id, seats: JSON.stringify(current_placement), unresolved: JSON.stringify(current_unresolved)}, function (data) {
+            alert('Sitzplan gespeichert.');
+        });
+    });
+
+    load_state();
+});
+</script>
