@@ -2,8 +2,16 @@
 <style>
 .sph-container {
     max-width: 1100px;
-    margin: 0 auto;
-    padding: 1em;
+    margin: 1.5em auto;
+    padding: 1.5em;
+    /* Gleiche "Card"-Optik wie sonst im Dashboard (siehe .card in styles.css) -
+       der Seiteninhalt sitzt sonst ohne Kontrastfläche direkt auf dem
+       personalisierten Hintergrundbild, was Legenden-Text und Outline-Buttons
+       (z.B. "Wunschrunde schließen") kaum lesbar macht. */
+    background-color: rgba(255, 255, 255, 0.85);
+    backdrop-filter: blur(10px);
+    border-radius: 0.5em;
+    box-shadow: 0 0.2em 0.6em rgba(0,0,0,0.15);
 }
 .sph-section {
     margin-bottom: 2em;
@@ -40,13 +48,13 @@ table.sph-wishes td, table.sph-wishes th {
     cursor: pointer;
     color: #c62828;
 }
-#sph_seats {
+#sph_seats, #sph_rule_seatmap {
     position: relative;
-    margin: 2em auto;
+    margin: 1em auto 2em auto;
     width: 100px;
     height: 100px;
 }
-#sph_seats .place {
+#sph_seats .place, #sph_rule_seatmap .place {
     position: absolute;
     width: 5vh;
     height: 5vh;
@@ -66,9 +74,33 @@ table.sph-wishes td, table.sph-wishes th {
     border-color: #e6a700;
     background-color: #fff6df;
 }
-#sph_seats .place .sph-name {
+#sph_seats .place .sph-name, #sph_rule_seatmap .place .sph-name {
     padding: 2px;
     word-break: break-word;
+}
+#sph_rule_seatmap {
+    margin-top: 0.5em;
+}
+#sph_rule_seatmap .place {
+    cursor: pointer;
+    background-color: #f4f4f4;
+    color: #bbb;
+    font-size: 1.6vh;
+}
+#sph_rule_seatmap .place::before {
+    content: '+';
+}
+#sph_rule_seatmap .place:hover {
+    border-color: #999;
+    background-color: #ececec;
+}
+#sph_rule_seatmap .place.taken {
+    background-color: #dceeff;
+    border-color: #2f7fd6;
+    color: inherit;
+}
+#sph_rule_seatmap .place.taken::before {
+    content: '';
 }
 .sph-legend {
     font-size: 0.9em;
@@ -98,8 +130,15 @@ table.sph-wishes td, table.sph-wishes th {
             <input type="number" id="sph_duration_days" class="form-control" style="width: 5em; display: inline-block;" min="1" max="60" value="4">
             <span style="margin-right: 0.5em;">Tage</span>
         </span>
-        <button class="btn btn-success" id="sph_bu_start_cycle">Wunschrunde starten</button>
+        <span id="sph_carry_over_group" style="display: none; margin-right: 0.5em;">
+            <label style="font-weight: normal;">
+                <input type="checkbox" id="sph_carry_over" checked>
+                Zwangspaare/Verbote/feste Plätze vom letzten Sitzplan übernehmen
+            </label>
+        </span>
+        <button class="btn btn-success" id="sph_bu_start_cycle">Neue Wunschrunde starten</button>
         <button class="btn btn-outline-secondary" id="sph_bu_close_wishes" style="display: none;">Wunschrunde schließen</button>
+        <button class="btn btn-outline-danger" id="sph_bu_discard_cycle" style="display: none;">Wunschrunde verwerfen (neu beginnen)</button>
         <span id="sph_cycle_info" class="sph-legend"></span>
     </div>
 
@@ -140,9 +179,12 @@ table.sph-wishes td, table.sph-wishes th {
                 <option value="right">rechts</option>
                 <option value="any">überall (keine Einschränkung mehr)</option>
             </select>
-            <button class="btn btn-sm btn-primary" id="sph_bu_add_rule" style="margin-left: 0.5em;">festlegen</button>
+            <button class="btn btn-sm btn-primary" id="sph_bu_add_rule" style="margin-left: 0.5em;">grober Bereich festlegen</button>
         </div>
         <div class="sph-rule-list" id="sph_rules_list"><span class="none-hint">keine festen Plätze</span></div>
+        <p class="sph-legend">Für einen <strong>genauen Platz</strong>: oben Person auswählen, dann unten auf der Karte auf einen freien Platz klicken. Nochmal klicken auf einen bereits vergebenen Platz entfernt die Vorgabe wieder.</p>
+        <span class="sph-tafel" style="margin-top: 0;">Tafel</span>
+        <div id="sph_rule_seatmap"></div>
     </div>
 
     <div class="sph-section">
@@ -206,6 +248,20 @@ function room_width_height() {
     return [w, h];
 }
 
+function pair_exists(list, a, b) {
+    return list.some(p => p.slice().sort().join() === [a, b].sort().join());
+}
+
+// Sind zwei Personen bereits über exakte feste Plätze (siehe
+// render_rule_seatmap) zu Tischnachbarn gemacht worden? Für die
+// Widerspruchsprüfung gegen Verbotspaare, in beide Richtungen nutzbar.
+function pinned_as_neighbors(email_a, email_b) {
+    let ra = fixed_rules.find(r => r[0] === email_a && rule_is_exact_seat(r));
+    let rb = fixed_rules.find(r => r[0] === email_b && rule_is_exact_seat(r));
+    if (!ra || !rb) return false;
+    return ra[2][0] === rb[2][0] && Math.abs(ra[1][0] - rb[1][0]) === 1;
+}
+
 function room_mid_y() {
     let maxY = 0;
     for (let s of seats) if (s[1] > maxY) maxY = s[1];
@@ -267,6 +323,27 @@ function render_pairs() {
     });
 }
 
+// Ist diese Regel ein exakter Platz (x_min===x_max, y_min===y_max) statt
+// eines groben Bereichs ("vorne" etc.)?
+function rule_is_exact_seat(r) {
+    return r[1][0] === r[1][1] && r[2][0] === r[2][1];
+}
+
+// Menschenlesbare Beschreibung einer fixed_rule fürs Chip/die Liste - erkennt
+// die vier Standardbereiche aus area_for_rule() wieder, sonst "genauer Platz"
+// bzw. allgemein "Bereich" (z. B. nach einer Übernahme aus einem anderen Raum
+// mit anderem Layout, wo die Koordinaten nicht mehr in ein Standardraster passen).
+function describe_rule(r) {
+    if (rule_is_exact_seat(r)) return 'genauer Platz';
+    let [, xr, yr] = r;
+    let labels = {front: 'vorne', back: 'hinten', left: 'links', right: 'rechts'};
+    for (let area in labels) {
+        let [axr, ayr] = area_for_rule(area);
+        if (axr[0] === xr[0] && axr[1] === xr[1] && ayr[0] === yr[0] && ayr[1] === yr[1]) return labels[area];
+    }
+    return 'Bereich';
+}
+
 function render_rules() {
     if (fixed_rules.length === 0) {
         $('#sph_rules_list').html('<span class="none-hint">keine festen Plätze</span>');
@@ -274,7 +351,7 @@ function render_rules() {
     }
     let html = '';
     for (let r of fixed_rules) {
-        html += `<span class="rule-chip">${display_name(r[0])}<a data-email="${r[0]}" class="bu-remove-rule">&times;</a></span>`;
+        html += `<span class="rule-chip">${display_name(r[0])} (${describe_rule(r)})<a data-email="${r[0]}" class="bu-remove-rule">&times;</a></span>`;
     }
     $('#sph_rules_list').html(html);
     $('.bu-remove-rule').off('click').on('click', function (e) {
@@ -282,6 +359,62 @@ function render_rules() {
         api_call('/api/sph_remove_fixed_rule', {cycle_id: open_cycle_id, email: email}, function (data) {
             fixed_rules = data.rules;
             render_rules();
+            render_rule_seatmap();
+        });
+    });
+}
+
+// Klickbare Karte mit allen Plätzen des Raums (gleiches Koordinatensystem wie
+// Shuffler und generierter Plan, seats_dict[raum]) - Klick auf einen freien
+// Platz weist ihn der oben ausgewählten Person exakt zu; Klick auf einen
+// bereits vergebenen Platz entfernt die Vorgabe wieder.
+function render_rule_seatmap() {
+    let container = $('#sph_rule_seatmap');
+    if (!open_cycle_id) {
+        container.empty().css('width', '').css('height', '');
+        return;
+    }
+    let [w, h] = room_width_height();
+    container.empty();
+    let container_width = Math.min($('.sph-container').width() || 900, 900);
+    let scale = Math.min(90, container_width / w);
+    container.css('height', `${h * scale}px`).css('width', `${w * scale}px`);
+    for (let i = 0; i < seats.length; i++) {
+        let seat = seats[i];
+        let rule = fixed_rules.find(r => rule_is_exact_seat(r) && r[1][0] === seat[0] && r[2][0] === seat[1]);
+        let div = $('<div>').addClass('place').css('left', `${seat[0] * scale}px`).css('top', `${seat[1] * scale}px`)
+            .css('width', `${scale * 0.9}px`).css('height', `${scale * 0.9}px`).data('seat-index', i);
+        if (rule) {
+            div.addClass('taken').attr('title', `${display_name(rule[0])} - klicken zum Entfernen`);
+            div.append($('<div>').addClass('sph-name').text(display_name(rule[0])));
+        } else {
+            div.attr('title', 'Klicken, um die oben ausgewählte Person hier fest zu platzieren');
+        }
+        container.append(div);
+    }
+    $('#sph_rule_seatmap .place').off('click').on('click', function () {
+        let seat = seats[$(this).data('seat-index')];
+        let existing = fixed_rules.find(r => rule_is_exact_seat(r) && r[1][0] === seat[0] && r[2][0] === seat[1]);
+        if (existing) {
+            api_call('/api/sph_remove_fixed_rule', {cycle_id: open_cycle_id, email: existing[0]}, function (data) {
+                fixed_rules = data.rules;
+                render_rules();
+                render_rule_seatmap();
+            });
+            return;
+        }
+        let email = $('#sph_rule_sus').val();
+        if (!email) return;
+        let neighbor_rule = fixed_rules.find(r => rule_is_exact_seat(r) && r[0] !== email && r[2][0] === seat[1] && Math.abs(r[1][0] - seat[0]) === 1);
+        if (neighbor_rule && pair_exists(forbidden_pairs, email, neighbor_rule[0])) {
+            alert(`${display_name(email)} und ${display_name(neighbor_rule[0])} sind als "dürfen nicht zusammensitzen" markiert - bitte das zuerst entfernen, bevor du sie auf Nachbarplätze setzt.`);
+            return;
+        }
+        api_call('/api/sph_set_fixed_rule', {cycle_id: open_cycle_id, email: email, x_min: seat[0], x_max: seat[0], y_min: seat[1], y_max: seat[1]}, function (data) {
+            if (data.success === false) { alert(data.error || 'Konnte nicht gespeichert werden.'); return; }
+            fixed_rules = data.rules;
+            render_rules();
+            render_rule_seatmap();
         });
     });
 }
@@ -353,6 +486,8 @@ function load_state() {
             fixed_rules = data.open_cycle.fixed_rules || [];
             $('#sph_bu_start_cycle').hide();
             $('#sph_duration_group').hide();
+            $('#sph_carry_over_group').hide();
+            $('#sph_bu_discard_cycle').show();
             if (data.open_cycle.wishes_open) {
                 $('#sph_bu_close_wishes').show().prop('disabled', false).text('Wunschrunde schließen');
                 $('#sph_cycle_info').text(`Wunschrunde läuft (Umfrage bis ${data.open_cycle.end_date}).`);
@@ -367,7 +502,9 @@ function load_state() {
             open_cycle_id = null;
             forced_pairs = []; forbidden_pairs = []; fixed_rules = [];
             $('#sph_bu_close_wishes').hide();
+            $('#sph_bu_discard_cycle').hide();
             $('#sph_duration_group').show();
+            $('#sph_carry_over_group').toggle(!!(data.last_cycle));
             if (data.can_start_cycle) {
                 $('#sph_bu_start_cycle').show().prop('disabled', false).attr('title', '');
                 $('#sph_cycle_info').text('Keine Wunschrunde offen.');
@@ -388,6 +525,7 @@ function load_state() {
         last_lucky_emails = new Set((data.last_cycle && data.last_cycle.satisfied_emails) || []);
         render_pairs();
         render_rules();
+        render_rule_seatmap();
         render_wishes();
     });
 }
@@ -709,7 +847,8 @@ document.addEventListener('DOMContentLoaded', function () {
     $('#sph_bu_start_cycle').click(function () {
         let duration_days = parseInt($('#sph_duration_days').val(), 10);
         if (!duration_days || duration_days < 1) duration_days = 4;
-        api_call('/api/sph_start_cycle', {klasse: klasse, raum: raum, duration_days: duration_days}, function (data) {
+        let carry_over = $('#sph_carry_over_group').is(':visible') && $('#sph_carry_over').is(':checked') ? 'yes' : 'no';
+        api_call('/api/sph_start_cycle', {klasse: klasse, raum: raum, duration_days: duration_days, carry_over: carry_over}, function (data) {
             if (data.success === false) { alert(data.error || 'Konnte nicht gestartet werden.'); return; }
             load_state();
         });
@@ -720,9 +859,13 @@ document.addEventListener('DOMContentLoaded', function () {
             load_state();
         });
     });
-    function pair_exists(list, a, b) {
-        return list.some(p => p.slice().sort().join() === [a, b].sort().join());
-    }
+    $('#sph_bu_discard_cycle').click(function () {
+        if (!confirm('Diese Wunschrunde wirklich verwerfen? Alle bisher eingegangenen Wünsche, Zwangspaare, Verbote und festen Plätze für diesen Zyklus gehen dabei verloren. Bereits gespeicherte Pläne in der Historie sind davon nicht betroffen.')) return;
+        api_call('/api/sph_discard_open_cycle', {cycle_id: open_cycle_id}, function (data) {
+            if (data.success === false) { alert(data.error || 'Konnte nicht verworfen werden.'); return; }
+            load_state();
+        });
+    });
     $('#sph_bu_add_forced').click(function () {
         let a = $('#sph_pair_a').val(), b = $('#sph_pair_b').val();
         if (a === b) { alert('Bitte zwei unterschiedliche Personen wählen.'); return; }
@@ -743,6 +886,10 @@ document.addEventListener('DOMContentLoaded', function () {
             alert(`${display_name(a)} und ${display_name(b)} sind bereits als "muss zusammensitzen" gesetzt - bitte das zuerst entfernen.`);
             return;
         }
+        if (pinned_as_neighbors(a, b)) {
+            alert(`${display_name(a)} und ${display_name(b)} sitzen bereits über feste Plätze nebeneinander - bitte zuerst einen der beiden festen Plätze entfernen.`);
+            return;
+        }
         api_call('/api/sph_set_pair', {cycle_id: open_cycle_id, email_a: a, email_b: b, kind: 'forbidden'}, function (data) {
             if (data.success === false) { alert(data.error || 'Konnte nicht gespeichert werden.'); return; }
             forbidden_pairs = data.pairs;
@@ -756,12 +903,15 @@ document.addEventListener('DOMContentLoaded', function () {
             api_call('/api/sph_remove_fixed_rule', {cycle_id: open_cycle_id, email: email}, function (data) {
                 fixed_rules = data.rules;
                 render_rules();
+                render_rule_seatmap();
             });
         } else {
             let [xr, yr] = area_for_rule(area);
             api_call('/api/sph_set_fixed_rule', {cycle_id: open_cycle_id, email: email, x_min: xr[0], x_max: xr[1], y_min: yr[0], y_max: yr[1]}, function (data) {
+                if (data.success === false) { alert(data.error || 'Konnte nicht gespeichert werden.'); return; }
                 fixed_rules = data.rules;
                 render_rules();
+                render_rule_seatmap();
             });
         }
     });

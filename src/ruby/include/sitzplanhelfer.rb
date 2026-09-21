@@ -72,7 +72,7 @@ class Main < Sinatra::Base
 
     post '/api/sph_start_cycle' do
         require_teacher!
-        data = parse_request_data(:required_keys => [:klasse, :raum], :optional_keys => [:duration_days],
+        data = parse_request_data(:required_keys => [:klasse, :raum], :optional_keys => [:duration_days, :carry_over],
                                   :types => {:duration_days => Integer})
         klasse = data[:klasse]
         raum = data[:raum]
@@ -113,6 +113,29 @@ class Main < Sinatra::Base
             now_time = Time.now.strftime('%H:%M')
             end_date = (Date.today + duration_days).strftime('%Y-%m-%d')
 
+            # Optional: Zwangspaare/Verbote/feste Plätze vom letzten GESPEICHERTEN
+            # Plan für dieselbe Klasse+Raum übernehmen, damit die Lehrkraft nicht
+            # jede Wunschrunde wieder bei Null anfängt. Bewusst nur gleiche
+            # Klasse+Raum, da die Koordinaten fester Plätze raumspezifisch sind.
+            carry_over = {:forced_pairs => '[]', :forbidden_pairs => '[]', :fixed_rules => '[]'}
+            if data[:carry_over] == 'yes'
+                last_rows = neo4j_query(<<~END_OF_QUERY, :klasse => klasse, :raum => raum)
+                    MATCH (sc:SeatingCycle {klasse: $klasse, raum: $raum})
+                    WHERE sc.saved_at IS NOT NULL
+                    RETURN sc
+                    ORDER BY sc.saved_at DESC
+                    LIMIT 1;
+                END_OF_QUERY
+                unless last_rows.empty?
+                    last_sc = last_rows.first['sc']
+                    carry_over = {
+                        :forced_pairs => last_sc[:forced_pairs] || '[]',
+                        :forbidden_pairs => last_sc[:forbidden_pairs] || '[]',
+                        :fixed_rules => last_sc[:fixed_rules] || '[]',
+                    }
+                end
+            end
+
             transaction do
                 neo4j_query_expect_one(<<~END_OF_QUERY, :session_email => @session_user[:email], :timestamp => timestamp, :pid => poll_id, :title => "Sitzplatzwunsch #{klasse} (Raum #{raum})", :items => items.to_json)
                     MATCH (a:User {email: $session_email})
@@ -137,9 +160,9 @@ class Main < Sinatra::Base
                     WHERE u.email IN $emails
                     CREATE (u)-[:IS_PARTICIPANT]->(pr);
                 END_OF_QUERY
-                neo4j_query_expect_one(<<~END_OF_QUERY, :session_email => @session_user[:email], :timestamp => timestamp, :id => cycle_id, :klasse => klasse, :raum => raum, :pid => poll_id, :prid => poll_run_id)
+                neo4j_query_expect_one(<<~END_OF_QUERY, :session_email => @session_user[:email], :timestamp => timestamp, :id => cycle_id, :klasse => klasse, :raum => raum, :pid => poll_id, :prid => poll_run_id, :forced_pairs => carry_over[:forced_pairs], :forbidden_pairs => carry_over[:forbidden_pairs], :fixed_rules => carry_over[:fixed_rules])
                     MATCH (a:User {email: $session_email})
-                    CREATE (sc:SeatingCycle {id: $id, klasse: $klasse, raum: $raum, poll_id: $pid, poll_run_id: $prid, created_at: $timestamp, forced_pairs: '[]', forbidden_pairs: '[]', fixed_rules: '[]'})
+                    CREATE (sc:SeatingCycle {id: $id, klasse: $klasse, raum: $raum, poll_id: $pid, poll_run_id: $prid, created_at: $timestamp, forced_pairs: $forced_pairs, forbidden_pairs: $forbidden_pairs, fixed_rules: $fixed_rules})
                     CREATE (sc)-[:STARTED_BY]->(a)
                     RETURN sc;
                 END_OF_QUERY
@@ -344,6 +367,18 @@ class Main < Sinatra::Base
                "#{name_a} und #{name_b} sind bereits als " \
                "\"#{data[:kind] == 'forced' ? 'darf nicht zusammensitzen' : 'muss zusammensitzen'}\" gesetzt - " \
                "bitte das zuerst entfernen.")
+        # Ein Verbotspaar widerspricht sich auch, wenn beide bereits über
+        # exakte feste Plätze (siehe sph_set_fixed_rule) zu Tischnachbarn
+        # gemacht wurden - genau der umgekehrte Fall zur Prüfung dort.
+        if data[:kind] == 'forbidden'
+            fixed = JSON.parse(sc[:fixed_rules] || '[]')
+            rule_a = fixed.find { |r| r[0] == data[:email_a] && r[1][0] == r[1][1] && r[2][0] == r[2][1] }
+            rule_b = fixed.find { |r| r[0] == data[:email_b] && r[1][0] == r[1][1] && r[2][0] == r[2][1] }
+            if rule_a && rule_b && rule_a[2][0] == rule_b[2][0] && (rule_a[1][0] - rule_b[1][0]).abs == 1
+                assert(false, "#{name_a} und #{name_b} sitzen bereits über feste Plätze nebeneinander - " \
+                       "bitte zuerst einen der beiden festen Plätze entfernen.")
+            end
+        end
         pairs = JSON.parse(sc[prop] || '[]')
         pairs << [data[:email_a], data[:email_b]] unless pairs.any? { |p| p.sort == wanted_pair }
         neo4j_query(<<~END_OF_QUERY, :id => data[:cycle_id], :value => pairs.to_json)
@@ -374,6 +409,29 @@ class Main < Sinatra::Base
                                   :types => {:x_min => Integer, :x_max => Integer, :y_min => Integer, :y_max => Integer})
         sc = sph_load_cycle_for_edit!(data[:cycle_id])
         rules = JSON.parse(sc[:fixed_rules] || '[]')
+        # Ein exakter Platz (x_min == x_max und y_min == y_max, siehe
+        # sitzplanhelfer.html/#sph_rule_seatmap) ist physisch nur einer Person
+        # zuweisbar - anders als eine grobe Bereichsvorgabe (z. B. "vorne"),
+        # die für mehrere SuS gleichzeitig gelten darf.
+        if data[:x_min] == data[:x_max] && data[:y_min] == data[:y_max]
+            conflict = rules.find { |r| r[0] != data[:email] && r[1] == [data[:x_min], data[:x_max]] && r[2] == [data[:y_min], data[:y_max]] }
+            if conflict
+                conflict_name = (@@user_info[conflict[0]] || {})[:display_name_official] || conflict[0]
+                assert(false, "Dieser Platz ist bereits #{conflict_name} fest zugewiesen - bitte das zuerst entfernen.")
+            end
+            # Genauso widersprüchlich: der Nachbarplatz ist bereits fest an
+            # jemanden vergeben, mit dem diese Person als Verbotspaar
+            # ("dürfen nicht zusammensitzen") markiert ist - umgekehrter Fall
+            # zur Prüfung in sph_set_pair.
+            neighbor_rule = rules.find { |r| r[0] != data[:email] && r[1][0] == r[1][1] && r[2][0] == r[2][1] && r[2][0] == data[:y_min] && (r[1][0] - data[:x_min]).abs == 1 }
+            if neighbor_rule
+                forbidden_pairs = JSON.parse(sc[:forbidden_pairs] || '[]')
+                if forbidden_pairs.any? { |p| p.sort == [data[:email], neighbor_rule[0]].sort }
+                    neighbor_name = (@@user_info[neighbor_rule[0]] || {})[:display_name_official] || neighbor_rule[0]
+                    assert(false, "#{neighbor_name} sitzt bereits fest auf dem Nachbarplatz, ist aber als \"dürfen nicht zusammensitzen\" markiert - bitte das zuerst entfernen.")
+                end
+            end
+        end
         rules.reject! { |r| r[0] == data[:email] }
         rules << [data[:email], [data[:x_min], data[:x_max]], [data[:y_min], data[:y_max]]]
         neo4j_query(<<~END_OF_QUERY, :id => data[:cycle_id], :value => rules.to_json)
@@ -394,6 +452,27 @@ class Main < Sinatra::Base
             SET sc.fixed_rules = $value;
         END_OF_QUERY
         respond(:ok => true, :rules => rules)
+    end
+
+    # Verwirft einen noch offenen (nicht gespeicherten) Zyklus komplett - für
+    # "das wollte ich so nicht, nochmal von vorne". Anders als sph_delete_cycle
+    # (nur für bereits gespeicherte Pläne) gibt es sonst keinen Weg, einen
+    # begonnenen Zyklus loszuwerden: sph_start_cycle liefert für dieselbe
+    # Klasse+Raum immer denselben offenen Zyklus zurück, solange er nicht
+    # gespeichert ist. Poll/PollRun bleiben unangetastet (werden bei
+    # sph_reopen_saved_cycle mit dem Ursprungsplan geteilt, dürfen also nicht
+    # mitgelöscht werden).
+    post '/api/sph_discard_open_cycle' do
+        require_teacher!
+        data = parse_request_data(:required_keys => [:cycle_id])
+        sc = sph_load_cycle_for_edit!(data[:cycle_id])
+        assert(sc[:saved_at].nil?, 'Nur eine noch offene (nicht gespeicherte) Wunschrunde kann verworfen werden.')
+        neo4j_query(<<~END_OF_QUERY, :id => data[:cycle_id])
+            MATCH (sc:SeatingCycle {id: $id})
+            OPTIONAL MATCH (sw:SeatWish)-[:FOR_CYCLE]->(sc)
+            DETACH DELETE sw, sc;
+        END_OF_QUERY
+        respond(:ok => true)
     end
 
     post '/api/sph_save_cycle' do

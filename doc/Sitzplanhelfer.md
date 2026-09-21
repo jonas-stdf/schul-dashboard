@@ -24,9 +24,24 @@ echte Sitzwünsche der SuS ein, und die Lehrkraft behält volle Kontrolle
    Lehrkraft kann einzelne Wünsche nur aktiv **ablehnen** (rotes Kreuz),
    eine Bestätigung ist nicht nötig.
 4. Zusätzlich können **Zwangspaare** (muss/darf nicht zusammensitzen)
-   und **feste Plätze** (vorne/hinten/links/rechts) gesetzt werden –
-   diese haben immer Vorrang vor Schülerwünschen. Ein Paar kann nie
-   gleichzeitig Zwang und Verbot sein.
+   und **feste Plätze** gesetzt werden – diese haben immer Vorrang vor
+   Schülerwünschen. Ein Paar kann nie gleichzeitig Zwang und Verbot
+   sein. Feste Plätze gibt es in zwei Varianten: eine grobe
+   Bereichsvorgabe (vorne/hinten/links/rechts) über die Auswahl, oder
+   ein **genauer Platz** per Klick auf die Sitzkarte unter „Feste
+   Plätze" – die Karte zeigt dieselben Koordinaten wie der generierte
+   Plan/der Shuffler (`seats_dict[raum]`) und passt sich damit
+   automatisch an die tatsächliche Bestuhlung des Raums an. Ein
+   exakter Platz kann immer nur einer Person zugewiesen sein (Konflikt
+   wird abgelehnt), eine grobe Bereichsvorgabe darf mehrere SuS
+   gleichzeitig betreffen.
+5. **Übernahme vom letzten Plan**: Beim Start einer neuen Wunschrunde
+   für dieselbe Klasse+Raum bietet eine Checkbox an, Zwangspaare,
+   Verbote und feste Plätze vom zuletzt gespeicherten Plan zu
+   übernehmen (voreingestellt an, wenn ein Plan existiert) – erspart
+   das erneute Eintippen bei wiederkehrenden Wunschrunden. Bewusst nur
+   für dieselbe Klasse+Raum-Kombination, da die Koordinaten fester
+   Plätze raumspezifisch sind.
 5. **Sitzplan erzeugen** lässt einen Algorithmus (client-seitig, siehe
    unten) mehrere Versuche rechnen und zeigt die Trefferquote
    transparent an. **Speichern** schließt die Wunschrunde automatisch
@@ -102,7 +117,7 @@ Quote zu erwarten.
 | `src/static/sitzplanhelfer.html` | Lehrkraft-Oberfläche inkl. Algorithmus |
 | `src/static/sitzplananzeige.html` | wunschfreie SuS-Ansicht (auch für ältere, gespeicherte Pläne per `?cycle=`) |
 | `src/ruby/main.rb` | `require './include/sitzplanhelfer.rb'` |
-| `src/static/directory.html` | Link „Sitzplanhelfer" pro Raum, neben dem Shuffler-Link |
+| `src/static/directory.html` | „Helfer"-Button direkt neben dem Shuffler-Button pro Raum, gemeinsam unter der Rubrik „Sitzplan" |
 
 Raumaufteilung (`seats.js`) wird mit dem Shuffler geteilt; `rules.js`
 und `bff.js` sind ausschließlich Shuffler-spezifisch und werden vom
