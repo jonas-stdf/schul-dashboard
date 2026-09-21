@@ -227,6 +227,9 @@ var last_seats = {};
 var last_unlucky_emails = new Set();
 var last_lucky_emails = new Set();
 var open_cycle_id = null;
+// Ist der offene Zyklus eine per "Bearbeiten" geöffnete Kopie eines bereits
+// gespeicherten Plans (statt einer frisch gestarteten Wunschrunde)?
+var is_reopened_edit = false;
 var current_placement = {};
 var current_unresolved = [];
 var current_satisfaction = {ok: 0, total: 0};
@@ -498,15 +501,26 @@ function load_state() {
             $('#sph_duration_group').hide();
             $('#sph_carry_over_group').hide();
             $('#sph_bu_discard_cycle').show();
-            if (data.open_cycle.wishes_open) {
+            // Eine per "Bearbeiten" geöffnete Kopie ist KEINE laufende
+            // Wunschrunde - dort wäre "Wunschrunde verwerfen" irreführend, weil
+            // weder Wünsche noch der ursprüngliche Plan verloren gehen.
+            is_reopened_edit = !!data.open_cycle.reopened_from;
+            if (is_reopened_edit) {
+                let d = new Date(data.open_cycle.reopened_from * 1000);
+                $('#sph_bu_close_wishes').hide();
+                $('#sph_bu_discard_cycle').text('Bearbeitung verwerfen');
+                $('#sph_cycle_info').text(`Du bearbeitest den gespeicherten Sitzplan vom ${d.toLocaleString('de-DE')}. Die Wünsche stammen aus der zugehörigen, bereits abgeschlossenen Wunschrunde – es läuft keine neue Umfrage. Zum Starten einer neuen Wunschrunde diese Bearbeitung zuerst speichern oder verwerfen.`);
+            } else if (data.open_cycle.wishes_open) {
                 $('#sph_bu_close_wishes').show().prop('disabled', false).text('Wunschrunde schließen');
+                $('#sph_bu_discard_cycle').text('Wunschrunde verwerfen (neu beginnen)');
                 $('#sph_cycle_info').text(`Wunschrunde läuft (Umfrage bis ${data.open_cycle.end_date}).`);
             } else {
                 // Umfrage-Zeitfenster ist vorbei (oder wurde manuell geschlossen) -
                 // der Zyklus selbst bleibt aber offen zum Bearbeiten/Erzeugen/
                 // Speichern, nur "nochmal schließen" ergibt keinen Sinn mehr.
                 $('#sph_bu_close_wishes').hide();
-                $('#sph_cycle_info').text(`Wunschrunde ist geschlossen (Umfrage endete am ${data.open_cycle.end_date} um ${data.open_cycle.end_time} Uhr). Wünsche können weiter bestätigt/abgelehnt und der Plan erzeugt werden.`);
+                $('#sph_bu_discard_cycle').text('Wunschrunde verwerfen (neu beginnen)');
+                $('#sph_cycle_info').text(`Wunschrunde ist geschlossen (Umfrage endete am ${data.open_cycle.end_date} um ${data.open_cycle.end_time} Uhr). Wünsche können weiter abgelehnt und der Plan erzeugt werden. Zum Starten einer neuen Wunschrunde zuerst speichern oder verwerfen.`);
             }
         } else {
             open_cycle_id = null;
@@ -898,7 +912,12 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     });
     $('#sph_bu_discard_cycle').click(function () {
-        if (!confirm('Diese Wunschrunde wirklich verwerfen? Alle bisher eingegangenen Wünsche, Zwangspaare, Verbote und festen Plätze für diesen Zyklus gehen dabei verloren. Bereits gespeicherte Pläne in der Historie sind davon nicht betroffen.')) return;
+        let frage = is_reopened_edit
+            // Beim Bearbeiten gehen weder Wünsche noch der Originalplan
+            // verloren - nur die hier gemachten Änderungen.
+            ? 'Bearbeitung verwerfen? Der ursprünglich gespeicherte Sitzplan bleibt unverändert in der Historie erhalten, und die Schülerwünsche gehen nicht verloren. Verworfen werden nur die hier vorgenommenen Änderungen an Zwangspaaren, Verboten und festen Plätzen.'
+            : 'Diese Wunschrunde wirklich verwerfen? Alle bisher eingegangenen Wünsche, Zwangspaare, Verbote und festen Plätze für diesen Zyklus gehen dabei verloren, und die Umfrage wird bei den SuS sofort zurückgezogen. Bereits gespeicherte Pläne in der Historie sind davon nicht betroffen.';
+        if (!confirm(frage)) return;
         api_call('/api/sph_discard_open_cycle', {cycle_id: open_cycle_id}, function (data) {
             if (data.success === false) { alert(data.error || 'Konnte nicht verworfen werden.'); return; }
             load_state();

@@ -221,12 +221,19 @@ class Main < Sinatra::Base
         rows = neo4j_query(<<~END_OF_QUERY, :klasse => klasse, :raum => raum)
             MATCH (sc:SeatingCycle {klasse: $klasse, raum: $raum})
             WHERE sc.saved_at IS NULL
-            RETURN sc
+            OPTIONAL MATCH (sc)-[:REOPENED_FROM]->(src:SeatingCycle)
+            RETURN sc, src.saved_at AS reopened_from
             ORDER BY sc.created_at DESC
             LIMIT 1;
         END_OF_QUERY
         unless rows.empty?
             sc = rows.first['sc']
+            # Gesetzt, wenn dieser offene Zyklus per "Bearbeiten" aus einem
+            # gespeicherten Plan entstanden ist (Zeitstempel des Originals).
+            # Dann ist es KEINE laufende Wunschrunde, sondern eine Bearbeitung -
+            # die Oberfläche muss das anders benennen, sonst droht sie mit dem
+            # Verlust von Wünschen, die in Wirklichkeit gar nicht betroffen sind.
+            reopened_from = rows.first['reopened_from']
             pr_rows = neo4j_query(<<~END_OF_QUERY, :prid => sc[:poll_run_id])
                 MATCH (pr:PollRun {id: $prid})
                 RETURN pr;
@@ -242,6 +249,7 @@ class Main < Sinatra::Base
                 :end_date => pr && pr[:end_date],
                 :end_time => pr && pr[:end_time],
                 :wishes_open => !!wishes_open,
+                :reopened_from => reopened_from,
                 :forced_pairs => JSON.parse(sc[:forced_pairs] || '[]'),
                 :forbidden_pairs => JSON.parse(sc[:forbidden_pairs] || '[]'),
                 :fixed_rules => JSON.parse(sc[:fixed_rules] || '[]'),
