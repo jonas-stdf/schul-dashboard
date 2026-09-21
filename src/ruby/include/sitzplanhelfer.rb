@@ -467,6 +467,13 @@ class Main < Sinatra::Base
         data = parse_request_data(:required_keys => [:cycle_id])
         sc = sph_load_cycle_for_edit!(data[:cycle_id])
         assert(sc[:saved_at].nil?, 'Nur eine noch offene (nicht gespeicherte) Wunschrunde kann verworfen werden.')
+        # Erst die Umfrage schließen, dann den Zyklus löschen: sonst bliebe eine
+        # Umfrage ohne zugehörigen Zyklus tagelang bei den SuS sichtbar, deren
+        # Antworten nirgends mehr ankommen - und beim Start der nächsten Runde
+        # sähen sie zwei gleichzeitig. Bei einem per sph_reopen_saved_cycle
+        # geöffneten Zyklus ist die Umfrage ohnehin längst geschlossen, ein
+        # erneutes Schließen ändert dort nichts.
+        sph_close_poll_run!(sc[:poll_run_id])
         neo4j_query(<<~END_OF_QUERY, :id => data[:cycle_id])
             MATCH (sc:SeatingCycle {id: $id})
             OPTIONAL MATCH (sw:SeatWish)-[:FOR_CYCLE]->(sc)
@@ -481,10 +488,28 @@ class Main < Sinatra::Base
                                   :optional_keys => [:satisfied_emails],
                                   :max_body_length => 256 * 1024, :max_string_length => 256 * 1024)
         sc = sph_load_cycle_for_edit!(data[:cycle_id])
+        # Die drei JSON-Felder kommen roh vom Client. Ungeprüft abgelegt würde
+        # kaputtes JSON später JEDE Anzeige dieses Plans mit einem Fehler
+        # abbrechen lassen - auch die der SuS -, und fremde E-Mail-Adressen im
+        # seats-Feld würden Namen aus anderen Klassen in die SuS-Ansicht
+        # tragen. Deshalb einmal parsen, auf SuS dieser Klasse beschränken und
+        # neu serialisiert speichern.
+        begin
+            seats = JSON.parse(data[:seats])
+            unresolved = JSON.parse(data[:unresolved])
+            satisfied = JSON.parse(data[:satisfied_emails] || '[]')
+        rescue JSON::ParserError
+            assert(false, 'Ungültige Plandaten.')
+        end
+        assert(seats.is_a?(Hash) && unresolved.is_a?(Array) && satisfied.is_a?(Array), 'Ungültige Plandaten.')
+        sus_emails = @@schueler_for_klasse[sc[:klasse]] || []
+        seats = seats.select { |email, idx| sus_emails.include?(email) && idx.is_a?(Integer) }
+        satisfied = satisfied.select { |email| sus_emails.include?(email) }
+        unresolved = unresolved.select { |f| f.is_a?(Hash) && sus_emails.include?(f['email']) }
         sph_close_poll_run!(sc[:poll_run_id])
         timestamp = Time.now.to_i
-        params = {:id => data[:cycle_id], :seats => data[:seats], :unresolved => data[:unresolved],
-                  :satisfied_emails => data[:satisfied_emails] || '[]', :timestamp => timestamp}
+        params = {:id => data[:cycle_id], :seats => seats.to_json, :unresolved => unresolved.to_json,
+                  :satisfied_emails => satisfied.to_json, :timestamp => timestamp}
         neo4j_query(<<~END_OF_QUERY, params)
             MATCH (sc:SeatingCycle {id: $id})
             SET sc.seats = $seats

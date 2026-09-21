@@ -239,6 +239,16 @@ function display_name(email) {
     return s ? s.display_name : email;
 }
 
+// Namen, E-Mail-Adressen und Klasse/Raum stammen aus den Schuldaten bzw. der
+// URL und werden unten teilweise in HTML-Strings eingesetzt. Sie sind zwar
+// nicht frei wählbar, aber ein Name mit spitzen Klammern würde die Seite sonst
+// zerlegen - deshalb grundsätzlich escapen.
+function esc(s) {
+    return String(s === undefined || s === null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 function room_width_height() {
     let w = 1, h = 1;
     for (let s of seats) {
@@ -295,7 +305,7 @@ function area_for_rule(area) {
 }
 
 function refresh_dropdowns() {
-    let opts = sus.map(s => `<option value="${s.email}">${s.display_name}</option>`).join('');
+    let opts = sus.map(s => `<option value="${esc(s.email)}">${esc(s.display_name)}</option>`).join('');
     $('#sph_pair_a, #sph_pair_b, #sph_rule_sus').html(opts);
 }
 
@@ -307,7 +317,7 @@ function render_pairs() {
         }
         let html = `<strong>${kind === 'forced' ? 'Muss zusammen' : 'Darf nicht zusammen'}:</strong> `;
         for (let [a, b] of pairs) {
-            html += `<span class="pair-chip">${display_name(a)} + ${display_name(b)}<a data-a="${a}" data-b="${b}" data-kind="${kind}" class="bu-remove-pair">&times;</a></span>`;
+            html += `<span class="pair-chip">${esc(display_name(a))} + ${esc(display_name(b))}<a data-a="${esc(a)}" data-b="${esc(b)}" data-kind="${kind}" class="bu-remove-pair">&times;</a></span>`;
         }
         $(el).html(html);
     }
@@ -351,7 +361,7 @@ function render_rules() {
     }
     let html = '';
     for (let r of fixed_rules) {
-        html += `<span class="rule-chip">${display_name(r[0])} (${describe_rule(r)})<a data-email="${r[0]}" class="bu-remove-rule">&times;</a></span>`;
+        html += `<span class="rule-chip">${esc(display_name(r[0]))} (${describe_rule(r)})<a data-email="${esc(r[0])}" class="bu-remove-rule">&times;</a></span>`;
     }
     $('#sph_rules_list').html(html);
     $('.bu-remove-rule').off('click').on('click', function (e) {
@@ -425,7 +435,7 @@ function render_rule_seatmap() {
 function wishes_mutual_any(email_a, email_b) {
     let wb = wishes[email_b];
     if (!wb) return false;
-    return wb.want1 === email_a || wb.want2 === email_a;
+    return wb.want1 === email_a || wb.want2 === email_a || wb.want3 === email_a;
 }
 
 // Wünsche gelten automatisch (kein extra Bestätigen nötig) - nur "rejected"
@@ -450,15 +460,15 @@ function render_wishes() {
         let w = wishes[s.email] || {};
         function cell(field, statusField) {
             if (!w[field]) return '<td>-</td><td></td>';
-            let name = display_name(w[field]);
+            let name = esc(display_name(w[field]));
             let rejected = w[statusField] === 'rejected';
             let mutual = wishes_mutual_any(s.email, w[field]) ? " <span title='Wechselseitiger Wunsch'>🤝</span>" : '';
             name = name + mutual;
             return `<td class="${rejected ? 'sph-wish-rejected' : ''}">${name}</td><td style="white-space: nowrap;">` +
-                `<i class="fa fa-times sph-status-btn reject ${rejected ? 'active' : ''}" data-email="${s.email}" data-slot="${statusField}" data-status="rejected" title="Wunsch ablehnen"></i>` +
+                `<i class="fa fa-times sph-status-btn reject ${rejected ? 'active' : ''}" data-email="${esc(s.email)}" data-slot="${statusField}" data-status="rejected" title="Wunsch ablehnen"></i>` +
                 `</td>`;
         }
-        rows += `<tr><td>${s.display_name}</td>${cell('want1', 'want1_status')}${cell('want2', 'want2_status')}${cell('want3', 'want3_status')}${cell('avoid1', 'avoid1_status')}</tr>`;
+        rows += `<tr><td>${esc(s.display_name)}</td>${cell('want1', 'want1_status')}${cell('want2', 'want2_status')}${cell('want3', 'want3_status')}${cell('avoid1', 'avoid1_status')}</tr>`;
     }
     $('#sph_wishes_body').html(rows);
     $('.sph-status-btn').off('click').on('click', function (e) {
@@ -558,7 +568,25 @@ function build_and_optimize_once(emails) {
     for (let [a, b] of forced_pairs) {
         if (!emails.includes(a) || !emails.includes(b)) continue;
         if (placed.has(a) && placed.has(b)) continue;
-        if (placed.has(a) || placed.has(b)) continue;
+        if (placed.has(a) || placed.has(b)) {
+            // Genau eine der beiden Personen sitzt schon fest (durch eine feste
+            // Platzvorgabe oben). Dann die andere direkt daneben setzen, statt
+            // das Zwangspaar aufzugeben - sonst bliebe es unerfüllt, obwohl der
+            // Nachbarplatz frei ist.
+            let anchor = placed.has(a) ? a : b;
+            let other = anchor === a ? b : a;
+            let s = seats[placement[anchor]];
+            for (let nc of [[s[0] + 1, s[1]], [s[0] - 1, s[1]]]) {
+                let j = available.find(k => seats[k][0] === nc[0] && seats[k][1] === nc[1]);
+                if (j !== undefined) {
+                    placement[other] = j;
+                    available = available.filter(k => k !== j);
+                    placed.add(other);
+                    break;
+                }
+            }
+            continue;
+        }
         let found = false;
         for (let i of shuffle_array(available)) {
             let s = seats[i];
@@ -800,9 +828,9 @@ function render_history(cycles) {
         rows += `<tr>
             <td>${date_str}${current_badge}</td>
             <td>${summary}</td>
-            <td><a class="btn btn-sm btn-outline-secondary" href="/sitzplananzeige/${klasse}/${raum}?cycle=${c.id}" target="_blank">Für SuS anzeigen</a></td>
-            <td><button class="btn btn-sm btn-outline-primary bu-edit-cycle" data-id="${c.id}">Bearbeiten</button></td>
-            <td><button class="btn btn-sm btn-outline-danger bu-delete-cycle" data-id="${c.id}">Löschen</button></td>
+            <td><a class="btn btn-sm btn-outline-secondary" href="/sitzplananzeige/${encodeURIComponent(klasse)}/${encodeURIComponent(raum)}?cycle=${encodeURIComponent(c.id)}" target="_blank">Für SuS anzeigen</a></td>
+            <td><button class="btn btn-sm btn-outline-primary bu-edit-cycle" data-id="${esc(c.id)}">Bearbeiten</button></td>
+            <td><button class="btn btn-sm btn-outline-danger bu-delete-cycle" data-id="${esc(c.id)}">Löschen</button></td>
         </tr>`;
     });
     $('#sph_history_body').html(rows);
@@ -927,6 +955,14 @@ document.addEventListener('DOMContentLoaded', function () {
         }, function (data) {
             if (data.success === false) { alert(data.error || 'Konnte nicht gespeichert werden.'); return; }
             alert('Sitzplan gespeichert.');
+            // Der Zyklus ist jetzt abgeschlossen - ein zweiter Klick auf
+            // "Speichern" würde ins Leere laufen (open_cycle_id ist nach
+            // load_state() null), also Knopf und Vorschau zurücksetzen.
+            $('#sph_bu_save').hide();
+            current_placement = {};
+            current_unresolved = [];
+            $('#sph_seats').empty();
+            $('#sph_unresolved_summary').empty();
             load_state();
             load_history();
         });
