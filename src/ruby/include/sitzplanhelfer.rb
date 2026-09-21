@@ -182,6 +182,8 @@ class Main < Sinatra::Base
                 RETURN pr;
             END_OF_QUERY
             pr = pr_rows.empty? ? nil : pr_rows.first['pr']
+            now_s = DateTime.now.strftime('%Y-%m-%dT%H:%M:%S')
+            wishes_open = pr && now_s >= "#{pr[:start_date]}T#{pr[:start_time]}:00" && now_s <= "#{pr[:end_date]}T#{pr[:end_time]}:00"
             open_cycle = {
                 :id => sc[:id],
                 :poll_run_id => sc[:poll_run_id],
@@ -189,6 +191,7 @@ class Main < Sinatra::Base
                 :start_time => pr && pr[:start_time],
                 :end_date => pr && pr[:end_date],
                 :end_time => pr && pr[:end_time],
+                :wishes_open => !!wishes_open,
                 :forced_pairs => JSON.parse(sc[:forced_pairs] || '[]'),
                 :forbidden_pairs => JSON.parse(sc[:forbidden_pairs] || '[]'),
                 :fixed_rules => JSON.parse(sc[:fixed_rules] || '[]'),

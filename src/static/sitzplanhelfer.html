@@ -325,8 +325,16 @@ function load_state() {
             forbidden_pairs = data.open_cycle.forbidden_pairs || [];
             fixed_rules = data.open_cycle.fixed_rules || [];
             $('#sph_bu_start_cycle').hide();
-            $('#sph_bu_close_wishes').show();
-            $('#sph_cycle_info').text(`Wunschrunde läuft (Umfrage bis ${data.open_cycle.end_date}).`);
+            if (data.open_cycle.wishes_open) {
+                $('#sph_bu_close_wishes').show().prop('disabled', false).text('Wunschrunde schließen');
+                $('#sph_cycle_info').text(`Wunschrunde läuft (Umfrage bis ${data.open_cycle.end_date}).`);
+            } else {
+                // Umfrage-Zeitfenster ist vorbei (oder wurde manuell geschlossen) -
+                // der Zyklus selbst bleibt aber offen zum Bearbeiten/Erzeugen/
+                // Speichern, nur "nochmal schließen" ergibt keinen Sinn mehr.
+                $('#sph_bu_close_wishes').hide();
+                $('#sph_cycle_info').text(`Wunschrunde ist geschlossen (Umfrage endete am ${data.open_cycle.end_date} um ${data.open_cycle.end_time} Uhr). Wünsche können weiter bestätigt/abgelehnt und der Plan erzeugt werden.`);
+            }
         } else {
             open_cycle_id = null;
             forced_pairs = []; forbidden_pairs = []; fixed_rules = [];
@@ -603,6 +611,7 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     });
     $('#sph_bu_close_wishes').click(function () {
+        $(this).prop('disabled', true).text('Wird geschlossen…');
         api_call('/api/sph_close_wishes', {cycle_id: open_cycle_id}, function (data) {
             load_state();
         });
