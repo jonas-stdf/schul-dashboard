@@ -154,6 +154,15 @@ table.sph-wishes td, table.sph-wishes th {
 
     <span class="sph-tafel">Tafel</span>
     <div id="sph_seats"></div>
+
+    <div class="sph-section" id="sph_history_section">
+        <h4>Gespeicherte Sitzpläne</h4>
+        <p class="sph-legend">Alle bisher gespeicherten Sitzpläne für diese Klasse/diesen Raum, neueste zuerst. Der oberste ist der, den SuS aktuell unter „Sitzplan anzeigen" sehen, wenn kein bestimmter Plan verlinkt wird. Ältere Pläne bleiben einzeln abrufbar; versehentlich gespeicherte können gelöscht werden.</p>
+        <table class="table table-sm">
+            <thead><tr><th>Gespeichert am</th><th>Zusammenfassung</th><th></th><th></th></tr></thead>
+            <tbody id="sph_history_body"><tr><td colspan="4" class="none-hint">Noch kein Sitzplan gespeichert.</td></tr></tbody>
+        </table>
+    </div>
 </div>
 
 <script>
@@ -640,6 +649,40 @@ function render_placement() {
     $('#sph_bu_save').show();
 }
 
+function render_history(cycles) {
+    if (!cycles || cycles.length === 0) {
+        $('#sph_history_body').html('<tr><td colspan="4" class="none-hint">Noch kein Sitzplan gespeichert.</td></tr>');
+        return;
+    }
+    let rows = '';
+    cycles.forEach((c, i) => {
+        let date_str = new Date(c.saved_at * 1000).toLocaleString('de-DE');
+        let current_badge = i === 0 ? ' <span class="badge badge-success">aktuell für SuS sichtbar</span>' : '';
+        let summary = `${c.satisfied_count} von ${c.seats_count} SuS mit erfülltem Wunsch, ${c.unresolved_count} offene Punkte`;
+        rows += `<tr>
+            <td>${date_str}${current_badge}</td>
+            <td>${summary}</td>
+            <td><a class="btn btn-sm btn-outline-secondary" href="/sitzplananzeige/${klasse}/${raum}?cycle=${c.id}" target="_blank">Für SuS anzeigen</a></td>
+            <td><button class="btn btn-sm btn-outline-danger bu-delete-cycle" data-id="${c.id}">Löschen</button></td>
+        </tr>`;
+    });
+    $('#sph_history_body').html(rows);
+    $('.bu-delete-cycle').off('click').on('click', function () {
+        let id = $(this).data('id');
+        if (!confirm('Diesen gespeicherten Sitzplan wirklich unwiderruflich löschen?')) return;
+        api_call('/api/sph_delete_cycle', {cycle_id: id}, function (data) {
+            if (data.success === false) { alert(data.error || 'Konnte nicht gelöscht werden.'); return; }
+            load_history();
+        });
+    });
+}
+
+function load_history() {
+    api_call('/api/sph_list_saved_cycles', {klasse: klasse, raum: raum}, function (data) {
+        render_history(data.cycles);
+    });
+}
+
 document.addEventListener('DOMContentLoaded', function () {
     let parts = window.location.pathname.replace('/sitzplanhelfer/', '').split('/');
     klasse = parts[0];
@@ -724,9 +767,12 @@ document.addEventListener('DOMContentLoaded', function () {
         }, function (data) {
             if (data.success === false) { alert(data.error || 'Konnte nicht gespeichert werden.'); return; }
             alert('Sitzplan gespeichert.');
+            load_state();
+            load_history();
         });
     });
 
     load_state();
+    load_history();
 });
 </script>

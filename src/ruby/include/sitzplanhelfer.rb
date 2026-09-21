@@ -250,25 +250,35 @@ class Main < Sinatra::Base
                 :open_cycle => open_cycle, :wishes => wishes, :last_cycle => last_cycle)
     end
 
-    # Öffentliche (Lehrkraft + eigene Klasse), wunsch-freie Sicht auf den
-    # zuletzt GESPEICHERTEN Sitzplan - für die SuS-Ansicht (sitzplananzeige.html).
+    # Öffentliche (Lehrkraft + eigene Klasse), wunsch-freie Sicht auf einen
+    # GESPEICHERTEN Sitzplan - für die SuS-Ansicht (sitzplananzeige.html).
     # Absichtlich getrennt von sph_get_state: liefert NUR Namen + Plätze,
     # nichts zu Wünschen/Bestätigungen/Paaren/Regeln (Lehrergeheimnis).
+    # Ohne cycle_id: der zuletzt gespeicherte Plan. Mit cycle_id: genau
+    # dieser (frühere) Plan - für die Historien-Liste im Sitzplanhelfer.
     post '/api/sph_get_public_plan' do
         require_user!
-        data = parse_request_data(:required_keys => [:klasse, :raum])
+        data = parse_request_data(:required_keys => [:klasse, :raum], :optional_keys => [:cycle_id])
         klasse = data[:klasse]
         raum = data[:raum]
         assert(sph_can_manage?(klasse) || @session_user[:klasse] == klasse,
                'Kein Zugriff auf den Sitzplan dieser Klasse.')
 
-        rows = neo4j_query(<<~END_OF_QUERY, :klasse => klasse, :raum => raum)
-            MATCH (sc:SeatingCycle {klasse: $klasse, raum: $raum})
-            WHERE sc.saved_at IS NOT NULL
-            RETURN sc
-            ORDER BY sc.saved_at DESC
-            LIMIT 1;
-        END_OF_QUERY
+        if data[:cycle_id]
+            rows = neo4j_query(<<~END_OF_QUERY, :id => data[:cycle_id], :klasse => klasse, :raum => raum)
+                MATCH (sc:SeatingCycle {id: $id, klasse: $klasse, raum: $raum})
+                WHERE sc.saved_at IS NOT NULL
+                RETURN sc;
+            END_OF_QUERY
+        else
+            rows = neo4j_query(<<~END_OF_QUERY, :klasse => klasse, :raum => raum)
+                MATCH (sc:SeatingCycle {klasse: $klasse, raum: $raum})
+                WHERE sc.saved_at IS NOT NULL
+                RETURN sc
+                ORDER BY sc.saved_at DESC
+                LIMIT 1;
+            END_OF_QUERY
+        end
         if rows.empty?
             respond(:ok => true, :klasse => klasse, :raum => raum, :saved_at => nil, :places => [])
         else
@@ -402,6 +412,51 @@ class Main < Sinatra::Base
             SET sc.unresolved = $unresolved
             SET sc.satisfied_emails = $satisfied_emails
             SET sc.saved_at = $timestamp;
+        END_OF_QUERY
+        respond(:ok => true)
+    end
+
+    # Liste aller GESPEICHERTEN Sitzpläne für Klasse+Raum, neueste zuerst -
+    # für die Historien-Ansicht im Sitzplanhelfer (nachträglich einsehbar,
+    # löschbar, pro Eintrag einzeln für SuS anzeigbar).
+    post '/api/sph_list_saved_cycles' do
+        require_teacher!
+        data = parse_request_data(:required_keys => [:klasse, :raum])
+        klasse = data[:klasse]
+        raum = data[:raum]
+        require_sph_access!(klasse)
+        rows = neo4j_query(<<~END_OF_QUERY, :klasse => klasse, :raum => raum)
+            MATCH (sc:SeatingCycle {klasse: $klasse, raum: $raum})
+            WHERE sc.saved_at IS NOT NULL
+            RETURN sc
+            ORDER BY sc.saved_at DESC;
+        END_OF_QUERY
+        cycles = rows.map do |row|
+            sc = row['sc']
+            {
+                :id => sc[:id],
+                :saved_at => sc[:saved_at],
+                :seats_count => JSON.parse(sc[:seats] || '{}').size,
+                :satisfied_count => JSON.parse(sc[:satisfied_emails] || '[]').size,
+                :unresolved_count => JSON.parse(sc[:unresolved] || '[]').map { |f| f['email'] }.uniq.size,
+            }
+        end
+        respond(:ok => true, :cycles => cycles)
+    end
+
+    # Löscht einen versehentlich gespeicherten Sitzplan wieder. Bewusst nur
+    # für bereits GESPEICHERTE Zyklen (nie den gerade offenen/laufenden) -
+    # sonst könnte man sich die laufende Wunschrunde unter dem Bearbeiten
+    # wegreißen.
+    post '/api/sph_delete_cycle' do
+        require_teacher!
+        data = parse_request_data(:required_keys => [:cycle_id])
+        sc = sph_load_cycle_for_edit!(data[:cycle_id])
+        assert(sc[:saved_at], 'Nur gespeicherte Sitzpläne können gelöscht werden.')
+        neo4j_query(<<~END_OF_QUERY, :id => data[:cycle_id])
+            MATCH (sc:SeatingCycle {id: $id})
+            OPTIONAL MATCH (sw:SeatWish)-[:FOR_CYCLE]->(sc)
+            DETACH DELETE sw, sc;
         END_OF_QUERY
         respond(:ok => true)
     end

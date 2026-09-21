@@ -69,7 +69,14 @@ document.addEventListener('DOMContentLoaded', function () {
     }
     $('#spa_label').text(`${klasse} – Raum ${raum}`);
 
-    api_call('/api/sph_get_public_plan', {klasse: klasse, raum: raum}, function (data) {
+    // Ohne ?cycle=... wird der zuletzt gespeicherte Plan gezeigt (Normalfall
+    // für SuS). Mit ?cycle=... zeigt der Link aus der Historien-Liste im
+    // Sitzplanhelfer gezielt einen bestimmten, ggf. älteren Plan.
+    let cycle_id = new URLSearchParams(window.location.search).get('cycle');
+    let request = {klasse: klasse, raum: raum};
+    if (cycle_id) request.cycle_id = cycle_id;
+
+    api_call('/api/sph_get_public_plan', request, function (data) {
         if (!data.places || data.places.length === 0) {
             $('#spa_empty_hint').show();
             return;
