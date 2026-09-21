@@ -65,12 +65,23 @@ class Main < Sinatra::Base
         wishes
     end
 
+    # Namen der Klassenleitung(en) für Anzeige/Fehlermeldungen.
+    def sph_klassenleiter_names(klasse)
+        (@@klassenleiter[klasse] || []).map { |sh| @@user_info[@@shorthands[sh]] }.compact.map { |u| u[:display_name_official] }
+    end
+
     post '/api/sph_start_cycle' do
         require_teacher!
         data = parse_request_data(:required_keys => [:klasse, :raum])
         klasse = data[:klasse]
         raum = data[:raum]
-        require_sph_access!(klasse)
+        # Nur die Klassenleitung (oder Admin) darf eine Wunschrunde STARTEN -
+        # sonst könnte jede Fachlehrkraft, die die Klasse aufruft, spontan eine
+        # Umfrage an alle SuS auslösen. Verwaltung eines bereits laufenden
+        # Zyklus (Wünsche bestätigen, Paare/Regeln, Plan erzeugen/speichern)
+        # bleibt bewusst für alle Lehrkräfte der Klasse offen (sph_can_manage?).
+        assert(klassenleiter_for_klasse_or_admin_logged_in?(klasse),
+               "Nur die Klassenleitung (#{sph_klassenleiter_names(klasse).join(', ')}) kann eine Sitzplatzwunsch-Umfrage starten.")
         sus_emails = @@schueler_for_klasse[klasse] || []
         assert(sus_emails.size > 0, 'Diese Klasse hat keine SuS.')
 
@@ -166,6 +177,9 @@ class Main < Sinatra::Base
         end
         sus = sus_emails.map { |e| {:email => e, :display_name => @@user_info[e][:display_name_official]} }
 
+        can_start_cycle = klassenleiter_for_klasse_or_admin_logged_in?(klasse)
+        klassenleiter_names = sph_klassenleiter_names(klasse)
+
         open_cycle = nil
         wishes = {}
         rows = neo4j_query(<<~END_OF_QUERY, :klasse => klasse, :raum => raum)
@@ -217,6 +231,7 @@ class Main < Sinatra::Base
         end
 
         respond(:ok => true, :klasse => klasse, :raum => raum, :sus => sus,
+                :can_start_cycle => can_start_cycle, :klassenleiter_names => klassenleiter_names,
                 :open_cycle => open_cycle, :wishes => wishes, :last_cycle => last_cycle)
     end
 

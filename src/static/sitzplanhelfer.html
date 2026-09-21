@@ -338,9 +338,19 @@ function load_state() {
         } else {
             open_cycle_id = null;
             forced_pairs = []; forbidden_pairs = []; fixed_rules = [];
-            $('#sph_bu_start_cycle').show();
             $('#sph_bu_close_wishes').hide();
-            $('#sph_cycle_info').text('Keine Wunschrunde offen.');
+            if (data.can_start_cycle) {
+                $('#sph_bu_start_cycle').show().prop('disabled', false).attr('title', '');
+                $('#sph_cycle_info').text('Keine Wunschrunde offen.');
+            } else {
+                // Nur die Klassenleitung darf eine Wunschrunde starten - sonst
+                // könnte jede Fachlehrkraft, die die Klasse aufruft, spontan
+                // eine Umfrage an alle SuS auslösen.
+                $('#sph_bu_start_cycle').show().prop('disabled', true)
+                    .attr('title', 'Nur die Klassenleitung kann eine Wunschrunde starten.');
+                let names = (data.klassenleiter_names || []).join(', ') || 'nicht hinterlegt';
+                $('#sph_cycle_info').text(`Keine Wunschrunde offen. Nur die Klassenleitung (${names}) kann eine neue starten.`);
+            }
         }
         last_seats = (data.last_cycle && data.last_cycle.seats) || {};
         render_pairs();
