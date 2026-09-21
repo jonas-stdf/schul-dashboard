@@ -155,7 +155,7 @@ table.sph-wishes td, table.sph-wishes th {
         </table>
     </div>
 
-    <div class="sph-section">
+    <div class="sph-section" id="sph_pairs_section">
         <h4>Zwangspaare (Lehrkraft)</h4>
         <div class="form-inline">
             <select class="form-control" id="sph_pair_a"></select>
@@ -168,7 +168,7 @@ table.sph-wishes td, table.sph-wishes th {
         <div class="sph-pair-list" id="sph_forbidden_list"><strong>Darf nicht zusammen:</strong> <span class="none-hint">keine</span></div>
     </div>
 
-    <div class="sph-section">
+    <div class="sph-section" id="sph_rules_section">
         <h4>Feste Plätze</h4>
         <div class="form-inline">
             <select class="form-control" id="sph_rule_sus"></select>
@@ -187,7 +187,7 @@ table.sph-wishes td, table.sph-wishes th {
         <div id="sph_rule_seatmap"></div>
     </div>
 
-    <div class="sph-section">
+    <div class="sph-section" id="sph_generate_section">
         <button class="btn btn-lg btn-primary" id="sph_bu_generate">Sitzplan erzeugen</button>
         <button class="btn btn-lg btn-success" id="sph_bu_save" style="display: none;">Sitzplan speichern</button>
         <a class="btn btn-lg btn-outline-secondary" id="sph_link_public_view" href="#" target="_blank">Sitzplan für SuS anzeigen (ohne Wünsche)</a>
@@ -533,6 +533,16 @@ function load_state() {
         let last_unresolved = (data.last_cycle && data.last_cycle.unresolved) || [];
         last_unlucky_emails = new Set(last_unresolved.filter(f => /^(Wunsch mit|Keiner der bestätigten)/.test(f.reason || '')).map(f => f.email));
         last_lucky_emails = new Set((data.last_cycle && data.last_cycle.satisfied_emails) || []);
+        // Ohne offene Wunschrunde lassen sich Paare, Regeln und "Sitzplan
+        // erzeugen" nicht sinnvoll bedienen (sie brauchen alle eine cycle_id) -
+        // deshalb ausblenden statt Klicks ins Leere laufen zu lassen. Der Link
+        // auf die SuS-Ansicht bleibt sichtbar, der zeigt den gespeicherten Plan.
+        $('#sph_pairs_section, #sph_rules_section, #sph_bu_generate').toggle(!!open_cycle_id);
+        if (!open_cycle_id) {
+            $('#sph_bu_save').hide();
+            $('#sph_unresolved_summary').empty();
+            $('#sph_seats').empty();
+        }
         render_pairs();
         render_rules();
         render_rule_seatmap();
