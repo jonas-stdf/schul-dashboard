@@ -72,9 +72,12 @@ class Main < Sinatra::Base
 
     post '/api/sph_start_cycle' do
         require_teacher!
-        data = parse_request_data(:required_keys => [:klasse, :raum])
+        data = parse_request_data(:required_keys => [:klasse, :raum], :optional_keys => [:duration_days],
+                                  :types => {:duration_days => Integer})
         klasse = data[:klasse]
         raum = data[:raum]
+        duration_days = data[:duration_days] || 4
+        assert((1..60).include?(duration_days), 'Umfragedauer muss zwischen 1 und 60 Tagen liegen.')
         # Nur die Klassenleitung (oder Admin) darf eine Wunschrunde STARTEN -
         # sonst könnte jede Fachlehrkraft, die die Klasse aufruft, spontan eine
         # Umfrage an alle SuS auslösen. Verwaltung eines bereits laufenden
@@ -108,7 +111,7 @@ class Main < Sinatra::Base
             timestamp = Time.now.to_i
             now_date = Date.today.strftime('%Y-%m-%d')
             now_time = Time.now.strftime('%H:%M')
-            end_date = (Date.today + 14).strftime('%Y-%m-%d')
+            end_date = (Date.today + duration_days).strftime('%Y-%m-%d')
 
             transaction do
                 neo4j_query_expect_one(<<~END_OF_QUERY, :session_email => @session_user[:email], :timestamp => timestamp, :pid => poll_id, :title => "Sitzplatzwunsch #{klasse} (Raum #{raum})", :items => items.to_json)
@@ -306,8 +309,19 @@ class Main < Sinatra::Base
         assert(['forced', 'forbidden'].include?(data[:kind]), 'Unbekannte Paar-Art.')
         sc = sph_load_cycle_for_edit!(data[:cycle_id])
         prop = data[:kind] == 'forced' ? :forced_pairs : :forbidden_pairs
+        other_prop = data[:kind] == 'forced' ? :forbidden_pairs : :forced_pairs
+        wanted_pair = [data[:email_a], data[:email_b]].sort
+        # Ein Paar darf nie gleichzeitig Zwangs- UND Verbotspaar sein - das
+        # wäre ein direkter Widerspruch der Lehrkraft mit sich selbst.
+        other_pairs = JSON.parse(sc[other_prop] || '[]')
+        name_a = (@@user_info[data[:email_a]] || {})[:display_name_official] || data[:email_a]
+        name_b = (@@user_info[data[:email_b]] || {})[:display_name_official] || data[:email_b]
+        assert(!other_pairs.any? { |p| p.sort == wanted_pair },
+               "#{name_a} und #{name_b} sind bereits als " \
+               "\"#{data[:kind] == 'forced' ? 'darf nicht zusammensitzen' : 'muss zusammensitzen'}\" gesetzt - " \
+               "bitte das zuerst entfernen.")
         pairs = JSON.parse(sc[prop] || '[]')
-        pairs << [data[:email_a], data[:email_b]] unless pairs.any? { |p| p.sort == [data[:email_a], data[:email_b]].sort }
+        pairs << [data[:email_a], data[:email_b]] unless pairs.any? { |p| p.sort == wanted_pair }
         neo4j_query(<<~END_OF_QUERY, :id => data[:cycle_id], :value => pairs.to_json)
             MATCH (sc:SeatingCycle {id: $id})
             SET sc.#{prop} = $value;

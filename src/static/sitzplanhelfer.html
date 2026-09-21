@@ -90,6 +90,11 @@ table.sph-wishes td, table.sph-wishes th {
     <p class="text-muted">Wunschbasierte Sitzordnung – neben dem <a href="#" id="sph_link_shuffler">Sitzplan-Shuffler</a>.</p>
 
     <div class="sph-section" id="sph_cycle_controls">
+        <span id="sph_duration_group" style="display: inline-block;">
+            <label for="sph_duration_days" style="margin-right: 0.3em;">Umfragedauer:</label>
+            <input type="number" id="sph_duration_days" class="form-control" style="width: 5em; display: inline-block;" min="1" max="60" value="4">
+            <span style="margin-right: 0.5em;">Tage</span>
+        </span>
         <button class="btn btn-success" id="sph_bu_start_cycle">Wunschrunde starten</button>
         <button class="btn btn-outline-secondary" id="sph_bu_close_wishes" style="display: none;">Wunschrunde schließen</button>
         <span id="sph_cycle_info" class="sph-legend"></span>
@@ -325,6 +330,7 @@ function load_state() {
             forbidden_pairs = data.open_cycle.forbidden_pairs || [];
             fixed_rules = data.open_cycle.fixed_rules || [];
             $('#sph_bu_start_cycle').hide();
+            $('#sph_duration_group').hide();
             if (data.open_cycle.wishes_open) {
                 $('#sph_bu_close_wishes').show().prop('disabled', false).text('Wunschrunde schließen');
                 $('#sph_cycle_info').text(`Wunschrunde läuft (Umfrage bis ${data.open_cycle.end_date}).`);
@@ -339,6 +345,7 @@ function load_state() {
             open_cycle_id = null;
             forced_pairs = []; forbidden_pairs = []; fixed_rules = [];
             $('#sph_bu_close_wishes').hide();
+            $('#sph_duration_group').show();
             if (data.can_start_cycle) {
                 $('#sph_bu_start_cycle').show().prop('disabled', false).attr('title', '');
                 $('#sph_cycle_info').text('Keine Wunschrunde offen.');
@@ -348,6 +355,7 @@ function load_state() {
                 // eine Umfrage an alle SuS auslösen.
                 $('#sph_bu_start_cycle').show().prop('disabled', true)
                     .attr('title', 'Nur die Klassenleitung kann eine Wunschrunde starten.');
+                $('#sph_duration_group').hide();
                 let names = (data.klassenleiter_names || []).join(', ') || 'nicht hinterlegt';
                 $('#sph_cycle_info').text(`Keine Wunschrunde offen. Nur die Klassenleitung (${names}) kann eine neue starten.`);
             }
@@ -616,7 +624,10 @@ document.addEventListener('DOMContentLoaded', function () {
     $('#sph_link_public_view').attr('href', `/sitzplananzeige/${klasse}/${raum}`);
 
     $('#sph_bu_start_cycle').click(function () {
-        api_call('/api/sph_start_cycle', {klasse: klasse, raum: raum}, function (data) {
+        let duration_days = parseInt($('#sph_duration_days').val(), 10);
+        if (!duration_days || duration_days < 1) duration_days = 4;
+        api_call('/api/sph_start_cycle', {klasse: klasse, raum: raum, duration_days: duration_days}, function (data) {
+            if (data.success === false) { alert(data.error || 'Konnte nicht gestartet werden.'); return; }
             load_state();
         });
     });
@@ -626,10 +637,18 @@ document.addEventListener('DOMContentLoaded', function () {
             load_state();
         });
     });
+    function pair_exists(list, a, b) {
+        return list.some(p => p.slice().sort().join() === [a, b].sort().join());
+    }
     $('#sph_bu_add_forced').click(function () {
         let a = $('#sph_pair_a').val(), b = $('#sph_pair_b').val();
         if (a === b) { alert('Bitte zwei unterschiedliche Personen wählen.'); return; }
+        if (pair_exists(forbidden_pairs, a, b)) {
+            alert(`${display_name(a)} und ${display_name(b)} sind bereits als "darf nicht zusammensitzen" gesetzt - bitte das zuerst entfernen.`);
+            return;
+        }
         api_call('/api/sph_set_pair', {cycle_id: open_cycle_id, email_a: a, email_b: b, kind: 'forced'}, function (data) {
+            if (data.success === false) { alert(data.error || 'Konnte nicht gespeichert werden.'); return; }
             forced_pairs = data.pairs;
             render_pairs();
         });
@@ -637,7 +656,12 @@ document.addEventListener('DOMContentLoaded', function () {
     $('#sph_bu_add_forbidden').click(function () {
         let a = $('#sph_pair_a').val(), b = $('#sph_pair_b').val();
         if (a === b) { alert('Bitte zwei unterschiedliche Personen wählen.'); return; }
+        if (pair_exists(forced_pairs, a, b)) {
+            alert(`${display_name(a)} und ${display_name(b)} sind bereits als "muss zusammensitzen" gesetzt - bitte das zuerst entfernen.`);
+            return;
+        }
         api_call('/api/sph_set_pair', {cycle_id: open_cycle_id, email_a: a, email_b: b, kind: 'forbidden'}, function (data) {
+            if (data.success === false) { alert(data.error || 'Konnte nicht gespeichert werden.'); return; }
             forbidden_pairs = data.pairs;
             render_pairs();
         });
