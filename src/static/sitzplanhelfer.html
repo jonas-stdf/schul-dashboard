@@ -159,8 +159,8 @@ table.sph-wishes td, table.sph-wishes th {
         <h4>Gespeicherte Sitzpläne</h4>
         <p class="sph-legend">Alle bisher gespeicherten Sitzpläne für diese Klasse/diesen Raum, neueste zuerst. Der oberste ist der, den SuS aktuell unter „Sitzplan anzeigen" sehen, wenn kein bestimmter Plan verlinkt wird. Ältere Pläne bleiben einzeln abrufbar; versehentlich gespeicherte können gelöscht werden.</p>
         <table class="table table-sm">
-            <thead><tr><th>Gespeichert am</th><th>Zusammenfassung</th><th></th><th></th></tr></thead>
-            <tbody id="sph_history_body"><tr><td colspan="4" class="none-hint">Noch kein Sitzplan gespeichert.</td></tr></tbody>
+            <thead><tr><th>Gespeichert am</th><th>Zusammenfassung</th><th></th><th></th><th></th></tr></thead>
+            <tbody id="sph_history_body"><tr><td colspan="5" class="none-hint">Noch kein Sitzplan gespeichert.</td></tr></tbody>
         </table>
     </div>
 </div>
@@ -651,7 +651,7 @@ function render_placement() {
 
 function render_history(cycles) {
     if (!cycles || cycles.length === 0) {
-        $('#sph_history_body').html('<tr><td colspan="4" class="none-hint">Noch kein Sitzplan gespeichert.</td></tr>');
+        $('#sph_history_body').html('<tr><td colspan="5" class="none-hint">Noch kein Sitzplan gespeichert.</td></tr>');
         return;
     }
     let rows = '';
@@ -663,6 +663,7 @@ function render_history(cycles) {
             <td>${date_str}${current_badge}</td>
             <td>${summary}</td>
             <td><a class="btn btn-sm btn-outline-secondary" href="/sitzplananzeige/${klasse}/${raum}?cycle=${c.id}" target="_blank">Für SuS anzeigen</a></td>
+            <td><button class="btn btn-sm btn-outline-primary bu-edit-cycle" data-id="${c.id}">Bearbeiten</button></td>
             <td><button class="btn btn-sm btn-outline-danger bu-delete-cycle" data-id="${c.id}">Löschen</button></td>
         </tr>`;
     });
@@ -673,6 +674,15 @@ function render_history(cycles) {
         api_call('/api/sph_delete_cycle', {cycle_id: id}, function (data) {
             if (data.success === false) { alert(data.error || 'Konnte nicht gelöscht werden.'); return; }
             load_history();
+        });
+    });
+    $('.bu-edit-cycle').off('click').on('click', function () {
+        let id = $(this).data('id');
+        api_call('/api/sph_reopen_saved_cycle', {cycle_id: id}, function (data) {
+            if (data.success === false) { alert(data.error || 'Konnte nicht zur Bearbeitung geöffnet werden.'); return; }
+            load_state();
+            load_history();
+            $('html, body').animate({scrollTop: $('#sph_cycle_controls').offset().top}, 300);
         });
     });
 }

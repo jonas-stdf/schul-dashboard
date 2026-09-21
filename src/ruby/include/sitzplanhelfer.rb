@@ -460,4 +460,55 @@ class Main < Sinatra::Base
         END_OF_QUERY
         respond(:ok => true)
     end
+
+    # Öffnet einen bereits gespeicherten Sitzplan erneut zur Bearbeitung -
+    # OHNE eine neue Umfrage zu starten. Dafür wird ein neuer Zyklus angelegt,
+    # der dieselbe (bereits geschlossene) Wunschrunde referenziert sowie die
+    # Paare/Regeln/Wunsch-Ablehnungen des Ursprungs übernimmt. Der Ursprung
+    # bleibt unverändert in der Historie erhalten - "leicht ändern und neu
+    # ausmixen", nicht "von vorne anfangen".
+    post '/api/sph_reopen_saved_cycle' do
+        require_teacher!
+        data = parse_request_data(:required_keys => [:cycle_id])
+        sc = sph_load_cycle_for_edit!(data[:cycle_id])
+        assert(sc[:saved_at], 'Nur gespeicherte Sitzpläne können erneut bearbeitet werden.')
+        existing_open = neo4j_query(<<~END_OF_QUERY, :klasse => sc[:klasse], :raum => sc[:raum])
+            MATCH (x:SeatingCycle {klasse: $klasse, raum: $raum})
+            WHERE x.saved_at IS NULL
+            RETURN x
+            LIMIT 1;
+        END_OF_QUERY
+        assert(existing_open.empty?, 'Es ist bereits eine Wunschrunde/Bearbeitung offen. Bitte diese zuerst abschließen oder speichern.')
+
+        new_id = RandomTag.generate(12)
+        timestamp = Time.now.to_i
+        params = {
+            :id => new_id, :klasse => sc[:klasse], :raum => sc[:raum],
+            :poll_id => sc[:poll_id], :poll_run_id => sc[:poll_run_id],
+            :forced_pairs => sc[:forced_pairs] || '[]', :forbidden_pairs => sc[:forbidden_pairs] || '[]',
+            :fixed_rules => sc[:fixed_rules] || '[]', :timestamp => timestamp,
+            :session_email => @session_user[:email], :source_id => sc[:id],
+        }
+        neo4j_query(<<~END_OF_QUERY, params)
+            MATCH (a:User {email: $session_email})
+            MATCH (old:SeatingCycle {id: $source_id})
+            CREATE (nc:SeatingCycle {id: $id, klasse: $klasse, raum: $raum, poll_id: $poll_id, poll_run_id: $poll_run_id,
+                                      created_at: $timestamp, forced_pairs: $forced_pairs, forbidden_pairs: $forbidden_pairs,
+                                      fixed_rules: $fixed_rules})
+            CREATE (nc)-[:STARTED_BY]->(a)
+            CREATE (nc)-[:REOPENED_FROM]->(old);
+        END_OF_QUERY
+        # Bisherige Wunsch-Ablehnungen mit in die Kopie übernehmen, damit die
+        # Lehrkraft nicht wieder bei Null anfängt.
+        neo4j_query(<<~END_OF_QUERY, :old_id => sc[:id], :new_id => new_id)
+            MATCH (sw:SeatWish)-[:FOR_CYCLE]->(:SeatingCycle {id: $old_id})
+            MATCH (sw)-[:BELONGS_TO_USER]->(u:User)
+            MATCH (nc:SeatingCycle {id: $new_id})
+            CREATE (u)<-[:BELONGS_TO_USER]-(:SeatWish {
+                want1_status: sw.want1_status, want2_status: sw.want2_status,
+                want3_status: sw.want3_status, avoid1_status: sw.avoid1_status
+            })-[:FOR_CYCLE]->(nc);
+        END_OF_QUERY
+        respond(:ok => true, :cycle_id => new_id)
+    end
 end
